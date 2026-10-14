@@ -13,6 +13,7 @@ namespace DomeProjection
         public long sequence;
         public DomeProjectionSettings settings;
         public bool mediaIsPlaying;
+        public bool mediaIsScrubbing;
         public double mediaTime;
     }
 

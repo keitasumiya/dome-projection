@@ -16,6 +16,7 @@ namespace DomeProjection
         bool IsPrepared { get; }
         bool IsStillImage { get; }
         bool IsPlaying { get; }
+        bool IsSeeking { get; }
         bool AudioMuted { get; set; }
         bool IsLooping { get; set; }
         double Time { get; set; }

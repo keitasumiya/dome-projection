@@ -19,6 +19,9 @@ namespace DomeProjection
         private const float PanelWidth = 440f;
         private const float ReferenceUiHeight = 900f;
         private const float VideoPathWidth = 288f;
+        // Aim for a 30 fps scrub preview. UnityVideoSource coalesces requests if
+        // the hardware decoder cannot complete them at this rate.
+        private const float SeekPreviewInterval = 1f / 30f;
         private readonly string[] gridModeNames = { "なし", "素材に重ねる", "校正パターン" };
         private readonly string[] panelTabNames = { "配置", "校正", "レンズ", "出力／投影" };
         private readonly string[] sourceModeNames = { "動画・画像", "外部ウィンドウ" };
@@ -77,6 +80,8 @@ namespace DomeProjection
         private bool mediaSeekDragging;
         private double mediaSeekPreviewTime;
         private bool resumeMediaAfterSeek;
+        private float nextSeekPreviewTime;
+        private double lastSeekPreviewTarget = -1d;
         private bool mediaSelectedThisSession;
         private bool mediaShouldPlayWhenVisible;
         private bool mediaPreparingForDisplay;
@@ -88,6 +93,7 @@ namespace DomeProjection
         private bool bridgeWantsMediaPlayback;
         private float nextBridgeUpdate;
         private float nextHeartbeatUpdate;
+        private float nextMediaResyncAllowed;
         private long bridgeSequence;
         private long lastAppliedBridgeSequence = -1;
         private long projectorStartedUtcTicks;
@@ -119,8 +125,10 @@ namespace DomeProjection
 
             Application.runInBackground = true;
             LoadSettings();
-            QualitySettings.vSyncCount = projectorMode ? 1 : 0;
-            Application.targetFrameRate = projectorMode ? -1 : settings.bridgeUpdateHz;
+            // Network synchronization frequency must not cap UI/video rendering.
+            // Both windows render at the display refresh rate independently.
+            QualitySettings.vSyncCount = 1;
+            Application.targetFrameRate = -1;
             windowWidthField = settings.windowWidth.ToString();
             windowHeightField = settings.windowHeight.ToString();
 #if !UNITY_EDITOR
@@ -368,6 +376,12 @@ namespace DomeProjection
             outputCamera.allowHDR = false;
             outputCamera.allowMSAA = false;
 
+            // UnityVideoSource routes movie audio through an AudioSource so that
+            // seeking can safely pause and resume the native decoder. Each app is
+            // a separate process and therefore needs exactly one AudioListener.
+            // The operator preview camera intentionally has no listener.
+            cameraObject.AddComponent<AudioListener>();
+
             outputRenderer = cameraObject.AddComponent<DomeProjectionRenderer>();
             outputRenderer.Settings = settings;
             outputRenderer.VideoSource = video;
@@ -492,6 +506,7 @@ namespace DomeProjection
             if (string.IsNullOrWhiteSpace(path)) return;
             mediaSeekDragging = false;
             resumeMediaAfterSeek = false;
+            lastSeekPreviewTarget = -1d;
             // Keep the standby screen visible until the replacement texture is
             // prepared. This prevents a frame from the previous file flashing.
             SetSourceMode(0);
@@ -1033,8 +1048,6 @@ namespace DomeProjection
         private void UpdateControlProcess()
         {
             ApplyControlMediaPlaybackState();
-            if (Application.targetFrameRate != settings.bridgeUpdateHz)
-                Application.targetFrameRate = settings.bridgeUpdateHz;
             if (Time.unscaledTime < nextBridgeUpdate) return;
             nextBridgeUpdate = Time.unscaledTime + 1f / Mathf.Max(15, settings.bridgeUpdateHz);
             video.AudioMuted = settings.audioMuted || ProjectionProcessBridge.IsOutputAlive();
@@ -1048,9 +1061,13 @@ namespace DomeProjection
             {
                 sequence = ++bridgeSequence,
                 settings = settings,
+                // Publish operator intent rather than VideoPlayer.isPlaying.
+                // isPlaying is temporarily false during every seek, which used
+                // to make Output pause and resume a second time.
                 mediaIsPlaying = settings.sourceMode == 0 && !settings.showIdleScreen
-                    && video != null && video.IsPlaying,
-                mediaTime = video != null ? video.Time : 0d
+                    && mediaShouldPlayWhenVisible && !mediaSeekDragging,
+                mediaIsScrubbing = mediaSeekDragging,
+                mediaTime = mediaSeekDragging ? mediaSeekPreviewTime : video != null ? video.Time : 0d
             });
         }
 
@@ -1119,8 +1136,16 @@ namespace DomeProjection
 
                 if (video.IsPrepared && !video.IsStillImage)
                 {
-                    if (Math.Abs(video.Time - shared.mediaTime) > 0.75d)
+                    var timeError = Math.Abs(video.Time - shared.mediaTime);
+                    if (shared.mediaIsScrubbing)
+                    {
+                        if (timeError > 0.02d) video.Seek(shared.mediaTime, false);
+                    }
+                    else if (timeError > 0.75d && Time.unscaledTime >= nextMediaResyncAllowed)
+                    {
+                        nextMediaResyncAllowed = Time.unscaledTime + 2f;
                         video.Seek(shared.mediaTime, shared.mediaIsPlaying);
+                    }
                     if (shared.mediaIsPlaying && !video.IsPlaying) video.Play();
                     else if (!shared.mediaIsPlaying && video.IsPlaying) video.Pause();
                 }
@@ -1468,12 +1493,27 @@ namespace DomeProjection
                 mediaSeekDragging = true;
                 mediaSeekPreviewTime = video.Time;
                 resumeMediaAfterSeek = video.IsPlaying;
+                nextSeekPreviewTime = 0f;
+                lastSeekPreviewTarget = -1d;
                 video.Pause();
             }
 
             displayedTime = GUI.HorizontalSlider(sliderRect, (float)displayedTime, 0f,
                 (float)video.Duration, sliderStyle, sliderThumbStyle);
-            if (mediaSeekDragging) mediaSeekPreviewTime = displayedTime;
+            if (mediaSeekDragging)
+            {
+                mediaSeekPreviewTime = displayedTime;
+                if (Time.unscaledTime >= nextSeekPreviewTime
+                    && Math.Abs(mediaSeekPreviewTime - lastSeekPreviewTarget) > 0.02d)
+                {
+                    nextSeekPreviewTime = Time.unscaledTime + SeekPreviewInterval;
+                    lastSeekPreviewTarget = mediaSeekPreviewTime;
+                    // Preview the frame while keeping audio paused. Requests are
+                    // coalesced inside UnityVideoSource if decoding is slower
+                    // than pointer movement.
+                    video.Seek(mediaSeekPreviewTime, false);
+                }
+            }
             GUILayout.Label(FormatTime(displayedTime) + " / " + FormatTime(video.Duration),
                 GUILayout.Width(92f));
             GUILayout.EndHorizontal();
@@ -1485,6 +1525,7 @@ namespace DomeProjection
             var shouldResume = resumeMediaAfterSeek;
             mediaSeekDragging = false;
             resumeMediaAfterSeek = false;
+            lastSeekPreviewTarget = -1d;
             video.Seek(target, shouldResume);
             status = "再生位置を " + FormatTime(target) + " に移動しました";
             Event.current.Use();
