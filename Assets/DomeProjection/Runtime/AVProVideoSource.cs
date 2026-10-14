@@ -22,7 +22,19 @@ namespace DomeProjection
         private bool audioMuted;
         private bool resumeAfterSeek;
         private bool finalSeekPending;
+        private bool finalSeekIssued;
         private int finalSeekIssuedFrame;
+        private bool previewSeekInFlight;
+        private bool previewSeekQueued;
+        private bool previewSeekSawNativeSeeking;
+        private int previewSeekIssuedFrame;
+        private int previewSeekTextureFrameCount;
+        private double activePreviewTime;
+        private double activePreviewTolerance;
+        private double queuedPreviewTime;
+        private double queuedPreviewTolerance;
+        private double lastPreviewRequestTime = double.NaN;
+        private float lastPreviewRequestRealtime = -1f;
         private double requestedSeekTime;
         private string sourcePath = string.Empty;
 
@@ -34,7 +46,8 @@ namespace DomeProjection
         public bool IsPrepared => imagePrepared || prepared;
         public bool IsStillImage => imagePrepared;
         public bool IsPlaying => !imagePrepared && player?.Control?.IsPlaying() == true;
-        public bool IsSeeking => !imagePrepared && (finalSeekPending || player?.Control?.IsSeeking() == true);
+        public bool IsSeeking => !imagePrepared && (finalSeekPending || previewSeekInFlight
+            || previewSeekQueued || player?.Control?.IsSeeking() == true);
         // Native AVPro backends expose their texture orientation at runtime.
         // Still images loaded by ImageConversion follow Unity's normal UVs.
         public bool RequiresVerticalFlip => !imagePrepared
@@ -93,8 +106,37 @@ namespace DomeProjection
 
         private void Update()
         {
-            if (!finalSeekPending || player?.Control == null
-                || UnityEngine.Time.frameCount <= finalSeekIssuedFrame || player.Control.IsSeeking()) return;
+            if (player?.Control == null) return;
+
+            if (previewSeekInFlight)
+            {
+                if (player.Control.IsSeeking())
+                {
+                    previewSeekSawNativeSeeking = true;
+                }
+                else if (UnityEngine.Time.frameCount > previewSeekIssuedFrame)
+                {
+                    var producer = player.TextureProducer;
+                    var frameAdvanced = producer != null && producer.SupportsTextureFrameCount()
+                        && producer.GetTextureFrameCount() != previewSeekTextureFrameCount;
+                    var previewCloseEnough = Math.Abs(player.Control.GetCurrentTime() - activePreviewTime)
+                        <= Math.Max(activePreviewTolerance + 0.05d, 0.1d);
+                    if (previewSeekSawNativeSeeking || frameAdvanced || previewCloseEnough
+                        || UnityEngine.Time.frameCount - previewSeekIssuedFrame > 18)
+                        CompletePreviewSeek();
+                }
+            }
+
+            if (previewSeekQueued && !previewSeekInFlight && !finalSeekPending)
+                TryIssuePreviewSeek();
+
+            if (!finalSeekPending) return;
+            if (!finalSeekIssued)
+            {
+                TryIssueFinalSeek();
+                return;
+            }
+            if (UnityEngine.Time.frameCount <= finalSeekIssuedFrame || player.Control.IsSeeking()) return;
 
             // Very short seeks can complete before AVPro exposes a seeking=true
             // frame, so its FinishedSeeking event is not guaranteed. Complete
@@ -137,7 +179,7 @@ namespace DomeProjection
         public void Play()
         {
             if (imagePrepared || !prepared || player?.Control == null) return;
-            if (finalSeekPending)
+            if (finalSeekPending || previewSeekInFlight || previewSeekQueued)
             {
                 resumeAfterSeek = true;
                 return;
@@ -155,17 +197,63 @@ namespace DomeProjection
         public void SeekPreview(double time)
         {
             if (imagePrepared || !prepared || player?.Control == null) return;
-            requestedSeekTime = ClampTime(time);
+            var target = ClampTime(time);
+            queuedPreviewTolerance = CalculatePreviewTolerance(target);
+            requestedSeekTime = target;
             resumeAfterSeek = false;
             finalSeekPending = false;
+            finalSeekIssued = false;
+            queuedPreviewTime = target;
+            previewSeekQueued = true;
             if (player.Control.IsPlaying()) player.Pause();
+            TryIssuePreviewSeek();
+        }
+
+        private double CalculatePreviewTolerance(double target)
+        {
+            var now = UnityEngine.Time.unscaledTime;
+            var speed = 0d;
+            if (!double.IsNaN(lastPreviewRequestTime) && lastPreviewRequestRealtime >= 0f)
+            {
+                var elapsed = Math.Max(now - lastPreviewRequestRealtime, 1f / 240f);
+                speed = Math.Abs(target - lastPreviewRequestTime) / elapsed;
+            }
+            lastPreviewRequestTime = target;
+            lastPreviewRequestRealtime = now;
+
+            // Fast pointer movement values responsiveness over frame accuracy.
+            // Slow movement remains within roughly two frames at 60 fps.
+            if (speed >= 20d) return 0.25d;
+            if (speed >= 8d) return 0.15d;
+            if (speed >= 2d) return 0.08d;
+            return 1d / 30d;
+        }
+
+        private void TryIssuePreviewSeek()
+        {
+            if (!previewSeekQueued || previewSeekInFlight || finalSeekPending
+                || player?.Control == null || player.Control.IsSeeking()) return;
+
+            previewSeekQueued = false;
+            previewSeekInFlight = true;
+            previewSeekSawNativeSeeking = false;
+            activePreviewTime = queuedPreviewTime;
+            activePreviewTolerance = queuedPreviewTolerance;
+            previewSeekIssuedFrame = UnityEngine.Time.frameCount;
+            var producer = player.TextureProducer;
+            previewSeekTextureFrameCount = producer != null && producer.SupportsTextureFrameCount()
+                ? producer.GetTextureFrameCount() : -1;
 #if UNITY_STANDALONE_OSX || UNITY_EDITOR_OSX
-            // A small tolerance lets AVFoundation return a nearby decoded frame
-            // quickly while remaining much closer than a keyframe-only seek.
-            const double tolerance = 1d / 30d;
-            player.Control.SeekWithTolerance(requestedSeekTime, tolerance, tolerance);
+            player.Control.SeekWithTolerance(activePreviewTime,
+                activePreviewTolerance, activePreviewTolerance);
+#elif UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+            // Media Foundation has no tolerance API in AVPro 2.9.3. Use its
+            // keyframe path while the pointer is moving quickly, then accurate
+            // seeks for fine positioning and pointer release.
+            if (activePreviewTolerance >= 0.12d) player.Control.SeekFast(activePreviewTime);
+            else player.Control.Seek(activePreviewTime);
 #else
-            player.Control.SeekFast(requestedSeekTime);
+            player.Control.SeekFast(activePreviewTime);
 #endif
         }
 
@@ -175,8 +263,18 @@ namespace DomeProjection
             requestedSeekTime = ClampTime(time);
             resumeAfterSeek = resumePlayback;
             finalSeekPending = true;
-            finalSeekIssuedFrame = UnityEngine.Time.frameCount;
+            finalSeekIssued = false;
+            previewSeekQueued = false;
             if (player.Control.IsPlaying()) player.Pause();
+            TryIssueFinalSeek();
+        }
+
+        private void TryIssueFinalSeek()
+        {
+            if (!finalSeekPending || finalSeekIssued || previewSeekInFlight
+                || player?.Control == null || player.Control.IsSeeking()) return;
+            finalSeekIssued = true;
+            finalSeekIssuedFrame = UnityEngine.Time.frameCount;
             player.Control.Seek(requestedSeekTime);
         }
 
@@ -184,6 +282,9 @@ namespace DomeProjection
         {
             resumeAfterSeek = false;
             finalSeekPending = false;
+            finalSeekIssued = false;
+            previewSeekInFlight = false;
+            previewSeekQueued = false;
             if (!imagePrepared && player?.Control != null) player.Stop();
         }
 
@@ -197,6 +298,11 @@ namespace DomeProjection
         {
             resumeAfterSeek = false;
             finalSeekPending = false;
+            finalSeekIssued = false;
+            previewSeekInFlight = false;
+            previewSeekQueued = false;
+            lastPreviewRequestTime = double.NaN;
+            lastPreviewRequestRealtime = -1f;
             prepared = false;
             imagePrepared = false;
             DestroyImageTexture();
@@ -218,14 +324,18 @@ namespace DomeProjection
                     Prepared?.Invoke();
                     break;
                 case MediaPlayerEvent.EventType.FinishedSeeking:
-                    if (!finalSeekPending) break;
-                    CompleteFinalSeek();
+                    if (finalSeekPending && finalSeekIssued) CompleteFinalSeek();
+                    else if (previewSeekInFlight) CompletePreviewSeek();
+                    else if (finalSeekPending) TryIssueFinalSeek();
                     break;
                 case MediaPlayerEvent.EventType.FinishedPlaying:
                     Ended?.Invoke();
                     break;
                 case MediaPlayerEvent.EventType.Error:
                     finalSeekPending = false;
+                    finalSeekIssued = false;
+                    previewSeekInFlight = false;
+                    previewSeekQueued = false;
                     resumeAfterSeek = false;
                     Failed?.Invoke("AVPro Videoエラー: " + Helper.GetErrorMessage(errorCode));
                     break;
@@ -236,10 +346,34 @@ namespace DomeProjection
         {
             if (!finalSeekPending) return;
             finalSeekPending = false;
+            finalSeekIssued = false;
             var shouldResume = resumeAfterSeek;
             resumeAfterSeek = false;
             player.AudioMuted = audioMuted;
             if (shouldResume) player.Play();
+        }
+
+        private void CompletePreviewSeek()
+        {
+            if (!previewSeekInFlight) return;
+            previewSeekInFlight = false;
+            previewSeekSawNativeSeeking = false;
+            if (finalSeekPending)
+            {
+                TryIssueFinalSeek();
+                return;
+            }
+            if (previewSeekQueued)
+            {
+                TryIssuePreviewSeek();
+                return;
+            }
+            if (resumeAfterSeek)
+            {
+                resumeAfterSeek = false;
+                player.AudioMuted = audioMuted;
+                player.Play();
+            }
         }
 
         private double ClampTime(double time)

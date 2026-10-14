@@ -12,7 +12,7 @@ namespace DomeProjection.Editor
     internal static class DomeProjectionProjectSetup
     {
         private const string MainScenePath = "Assets/Scenes/Main.unity";
-        private const string ReleaseVersion = "2026.10.15.11";
+        private const string ReleaseVersion = "2026.10.15.12";
 
         static DomeProjectionProjectSetup()
         {
