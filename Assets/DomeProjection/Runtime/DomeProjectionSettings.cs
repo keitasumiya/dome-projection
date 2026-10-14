@@ -6,7 +6,7 @@ namespace DomeProjection
     [Serializable]
     public sealed class DomeProjectionSettings
     {
-        public int settingsVersion = 11;
+        public int settingsVersion = 14;
         public string videoPath = string.Empty;
 
         // Input source. 0 = video/image file, 1 = captured desktop window.
@@ -23,6 +23,17 @@ namespace DomeProjection
         public int windowCaptureFps = 30;
         public bool focusWindowOnCapture;
         public bool initialMacPermissionsRequested;
+
+        // Screen shown when no source is available or the operator explicitly
+        // ends a presentation. 0 = black, 1 = selected image. The dome guide
+        // is an independent overlay controlled by gridMode.
+        public int idleDisplayMode;
+        public string idleImagePath = string.Empty;
+        public bool idleImageIsFlat = true;
+        public bool showIdleScreen;
+
+        // Optional 2:1 equirectangular image drawn behind a captured flat window.
+        public string windowBackgroundImagePath = string.Empty;
 
         // Flat content is placed on a virtual tangent plane inside the dome.
         // Polar angle is measured from the dome centre (zenith) toward its rim.
@@ -213,7 +224,42 @@ namespace DomeProjection
                 capturedWindowId = 0L;
             }
 
-            settingsVersion = 11;
+            if (settingsVersion < 12)
+            {
+                // Older versions always fell back to the calibration dome.
+                // Default upgraded installations to a clean black standby.
+                idleDisplayMode = 0;
+                idleImagePath = string.Empty;
+                idleImageIsFlat = true;
+                showIdleScreen = false;
+            }
+
+            if (settingsVersion < 13)
+            {
+                // The old third standby option replaced the selected standby
+                // image with a calibration-only screen. Preserve the visible
+                // guide, but move it to the independent overlay layer.
+                if (idleDisplayMode == 2)
+                {
+                    idleDisplayMode = 0;
+                    gridMode = 1;
+                }
+                windowBackgroundImagePath = string.Empty;
+                // Upgraded installations should use a maximized ordinary
+                // window by default, never an OS fullscreen Space.
+                startMaximized = true;
+            }
+
+            if (settingsVersion < 14)
+            {
+                // Guide toggling in v12 and earlier could silently replace a
+                // configured default image with black. If the copied image is
+                // still present in the settings, restore it as the standby.
+                if (!string.IsNullOrWhiteSpace(idleImagePath)) idleDisplayMode = 1;
+                startMaximized = true;
+            }
+
+            settingsVersion = 14;
         }
 
         public void Clamp()
@@ -259,6 +305,7 @@ namespace DomeProjection
             flatCropTop = Mathf.Clamp(flatCropTop, 0f, 0.45f);
             flatCropBottom = Mathf.Clamp(flatCropBottom, 0f, 0.45f);
             bridgeUpdateHz = Mathf.Clamp(bridgeUpdateHz, 15, 120);
+            idleDisplayMode = Mathf.Clamp(idleDisplayMode, 0, 1);
         }
     }
 }

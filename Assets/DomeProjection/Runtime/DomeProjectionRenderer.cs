@@ -7,6 +7,8 @@ namespace DomeProjection
     {
         private static readonly int VideoTex = Shader.PropertyToID("_VideoTex");
         private static readonly int HasVideo = Shader.PropertyToID("_HasVideo");
+        private static readonly int BackgroundTex = Shader.PropertyToID("_BackgroundTex");
+        private static readonly int HasBackground = Shader.PropertyToID("_HasBackground");
         private static readonly int OutputAspect = Shader.PropertyToID("_OutputAspect");
         private static readonly int Center = Shader.PropertyToID("_Center");
         private static readonly int Radius = Shader.PropertyToID("_Radius");
@@ -34,6 +36,8 @@ namespace DomeProjection
 
         public DomeProjectionSettings Settings { get; set; }
         public IVideoSource VideoSource { get; set; }
+        public IVideoSource IdleImageSource { get; set; }
+        public IVideoSource WindowBackgroundImageSource { get; set; }
         public IWindowCaptureSource WindowSource { get; set; }
 
         private void Awake()
@@ -67,14 +71,31 @@ namespace DomeProjection
 
             Settings.Clamp();
             var useWindow = Settings.sourceMode == 1;
-            var texture = useWindow ? WindowSource?.Texture : VideoSource?.Texture;
-            var hasVideo = texture != null && (useWindow ? WindowSource.IsPrepared : VideoSource.IsPrepared);
-            var sourceWidth = useWindow ? WindowSource?.Width ?? 0 : VideoSource?.Width ?? 0;
-            var sourceHeight = useWindow ? WindowSource?.Height ?? 0 : VideoSource?.Height ?? 0;
-            var flatContent = useWindow || Settings.fileIsFlat;
+            var primaryTexture = useWindow ? WindowSource?.Texture : VideoSource?.Texture;
+            var primaryPrepared = primaryTexture != null
+                && (useWindow ? WindowSource.IsPrepared : VideoSource.IsPrepared);
+            var usePrimary = primaryPrepared && !Settings.showIdleScreen;
+            var useIdleImage = !usePrimary && Settings.idleDisplayMode == 1
+                && IdleImageSource?.Texture != null && IdleImageSource.IsPrepared;
+            var texture = usePrimary ? primaryTexture : useIdleImage ? IdleImageSource.Texture : null;
+            var hasVideo = texture != null;
+            var sourceWidth = usePrimary
+                ? useWindow ? WindowSource?.Width ?? 0 : VideoSource?.Width ?? 0
+                : useIdleImage ? IdleImageSource.Width : 0;
+            var sourceHeight = usePrimary
+                ? useWindow ? WindowSource?.Height ?? 0 : VideoSource?.Height ?? 0
+                : useIdleImage ? IdleImageSource.Height : 0;
+            var flatContent = usePrimary ? useWindow || Settings.fileIsFlat
+                : useIdleImage && Settings.idleImageIsFlat;
+            var useWindowBackground = usePrimary && useWindow
+                && WindowBackgroundImageSource?.Texture != null
+                && WindowBackgroundImageSource.IsPrepared;
 
             material.SetTexture(VideoTex, hasVideo ? texture : Texture2D.blackTexture);
             material.SetFloat(HasVideo, hasVideo ? 1f : 0f);
+            material.SetTexture(BackgroundTex, useWindowBackground
+                ? WindowBackgroundImageSource.Texture : Texture2D.blackTexture);
+            material.SetFloat(HasBackground, useWindowBackground ? 1f : 0f);
             var width = destination != null ? destination.width : outputCamera.pixelWidth;
             var height = destination != null ? destination.height : outputCamera.pixelHeight;
             material.SetFloat(OutputAspect, height > 0 ? (float)width / height : 1f);
@@ -90,7 +111,7 @@ namespace DomeProjection
             material.SetVector(ColorAdjust, new Vector4(Settings.brightness, Settings.gamma, 0f, 0f));
             material.SetFloat(EdgeFade, Settings.edgeFade);
             material.SetVector(InputFlip, new Vector4(Settings.flipInputX ? 1f : 0f, Settings.flipInputY ? 1f : 0f, 0f, 0f));
-            material.SetFloat(GridMode, hasVideo ? Settings.gridMode : 2f);
+            material.SetFloat(GridMode, Settings.gridMode);
             material.SetVector(GridSettings, new Vector4(Settings.gridStepDegrees, Settings.gridOpacity, 15f, Settings.showOrientationMarkers ? 1f : 0f));
             material.SetVector(GridAppearance, new Vector4(Settings.gridLineWidth, 0f, 0f, 0f));
             material.SetFloat(ContentMode, flatContent ? 1f : 0f);

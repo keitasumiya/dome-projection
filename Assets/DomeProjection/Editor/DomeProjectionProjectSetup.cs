@@ -12,6 +12,7 @@ namespace DomeProjection.Editor
     internal static class DomeProjectionProjectSetup
     {
         private const string MainScenePath = "Assets/Scenes/Main.unity";
+        private const string ReleaseVersion = "2026.10.15.7";
 
         static DomeProjectionProjectSetup()
         {
@@ -26,7 +27,10 @@ namespace DomeProjection.Editor
             PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Standalone, "com.DefaultCompany.dome-projection");
             PlayerSettings.colorSpace = ColorSpace.Linear;
             PlayerSettings.runInBackground = true;
-            PlayerSettings.fullScreenMode = FullScreenMode.MaximizedWindow;
+            // Control must start as an ordinary resizable window. Runtime code
+            // maximizes it with the native OS window command so macOS does not
+            // turn Unity's MaximizedWindow mode into a separate fullscreen Space.
+            PlayerSettings.fullScreenMode = FullScreenMode.Windowed;
             PlayerSettings.resizableWindow = true;
             PlayerSettings.forceSingleInstance = true;
 
@@ -69,7 +73,7 @@ namespace DomeProjection.Editor
             PlayerSettings.productName = productName;
             PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Standalone, applicationIdentifier);
             PlayerSettings.forceSingleInstance = false;
-            PlayerSettings.bundleVersion = "1.0";
+            PlayerSettings.bundleVersion = ReleaseVersion;
             if (target == BuildTarget.StandaloneOSX)
                 PlayerSettings.macOS.buildNumber = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
             var icon = AssetDatabase.LoadAssetAtPath<Texture2D>(iconPath);

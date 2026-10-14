@@ -4,6 +4,7 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
     Properties
     {
         _VideoTex ("360 Video", 2D) = "black" {}
+        _BackgroundTex ("Window Background", 2D) = "black" {}
     }
 
     SubShader
@@ -22,6 +23,8 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
 
             sampler2D _VideoTex;
             float _HasVideo;
+            sampler2D _BackgroundTex;
+            float _HasBackground;
             float _OutputAspect;
             float2 _Center;
             float _Radius;
@@ -147,6 +150,11 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
                 float azimuth = atan2(lensPoint.x, lensPoint.y);
                 float sinTheta = sin(theta);
                 float3 direction = float3(sinTheta * sin(azimuth), cos(theta), sinTheta * cos(azimuth));
+                float3 backgroundDirection = RotateDirection(direction, _Orientation);
+                float2 backgroundUV = float2(frac(atan2(backgroundDirection.x, backgroundDirection.z) / (2.0 * PI) + 0.5),
+                                             0.5 - asin(clamp(backgroundDirection.y, -1.0, 1.0)) / PI);
+                if (_InputFlip.x > 0.5) backgroundUV.x = 1.0 - backgroundUV.x;
+                if (_InputFlip.y > 0.5) backgroundUV.y = 1.0 - backgroundUV.y;
                 float2 videoUV;
                 float contentMask = 1.0;
                 if (_ContentMode > 0.5)
@@ -187,7 +195,17 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
                 if (_InputFlip.x > 0.5) videoUV.x = 1.0 - videoUV.x;
                 if (_InputFlip.y > 0.5) videoUV.y = 1.0 - videoUV.y;
 
-                float3 videoColor = _HasVideo > 0.5 ? tex2D(_VideoTex, videoUV).rgb * contentMask : float3(0, 0, 0);
+                float3 backgroundColor = _HasBackground > 0.5
+                    ? tex2D(_BackgroundTex, backgroundUV).rgb
+                    : float3(0, 0, 0);
+                float3 videoColor = backgroundColor;
+                if (_HasVideo > 0.5)
+                {
+                    float3 primaryColor = tex2D(_VideoTex, videoUV).rgb;
+                    videoColor = _HasBackground > 0.5
+                        ? lerp(backgroundColor, primaryColor, contentMask)
+                        : primaryColor * contentMask;
+                }
                 videoColor = pow(max(videoColor * _ColorAdjust.x, 0.0), 1.0 / max(_ColorAdjust.y, 0.001));
 
                 float3 grid = CalibrationGrid(outputRadius, azimuth, degrees(theta));

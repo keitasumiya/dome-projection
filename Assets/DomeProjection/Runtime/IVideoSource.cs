@@ -10,6 +10,7 @@ namespace DomeProjection
     {
         event Action Prepared;
         event Action<string> Failed;
+        event Action Ended;
 
         Texture Texture { get; }
         bool IsPrepared { get; }
@@ -28,6 +29,7 @@ namespace DomeProjection
         void Pause();
         void Seek(double time, bool resumePlayback);
         void Stop();
+        void Clear();
     }
 }
 

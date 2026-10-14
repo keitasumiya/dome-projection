@@ -20,12 +20,14 @@ namespace DomeProjection
         private const float ReferenceUiHeight = 900f;
         private const float VideoPathWidth = 288f;
         private readonly string[] gridModeNames = { "なし", "素材に重ねる", "校正パターン" };
-        private readonly string[] panelTabNames = { "配置", "校正", "レンズ", "投影" };
+        private readonly string[] panelTabNames = { "配置", "校正", "レンズ", "出力／投影" };
         private readonly string[] sourceModeNames = { "動画・画像", "外部ウィンドウ" };
         private readonly int[] bridgeRates = { 30, 60, 120 };
 
         private DomeProjectionSettings settings;
         private IVideoSource video;
+        private IVideoSource idleImage;
+        private IVideoSource windowBackgroundImage;
         private IWindowCaptureSource windowCapture;
         private DomeProjectionRenderer outputRenderer;
         private Camera outputCamera;
@@ -33,15 +35,31 @@ namespace DomeProjection
         private Camera previewCamera;
         private string status = "校正パターンを表示中";
         private string pathField = string.Empty;
+        private string idleImagePathField = string.Empty;
+        private string windowBackgroundImagePathField = string.Empty;
         private string windowWidthField = "1600";
         private string windowHeightField = "900";
         private bool showControls = true;
         private GUIStyle titleStyle;
         private GUIStyle smallStyle;
         private GUIStyle panelStyle;
+        private GUIStyle tabStyle;
+        private GUIStyle activeTabStyle;
+        private GUIStyle tabContentStyle;
+        private GUIStyle dropdownButtonStyle;
+        private GUIStyle dropdownRowStyle;
+        private GUIStyle dropdownSelectedRowStyle;
+        private GUIStyle dropdownLabelStyle;
         private GUIStyle sliderStyle;
         private GUIStyle sliderThumbStyle;
         private Texture2D panelTexture;
+        private Texture2D tabTexture;
+        private Texture2D activeTabTexture;
+        private Texture2D tabContentTexture;
+        private Texture2D dropdownRowTexture;
+        private Texture2D dropdownSelectedRowTexture;
+        private Texture2D scrollbarTexture;
+        private Texture2D scrollbarThumbTexture;
         private Texture2D sliderTexture;
         private Texture2D sliderThumbTexture;
         private Texture2D sliderThumbActiveTexture;
@@ -53,9 +71,15 @@ namespace DomeProjection
         private float windowDropdownScroll;
         private Rect windowDropdownAnchor;
         private bool consumeWindowDropdownMouseUp;
+        private int hoveredWindowIndex = -1;
+        private float hoveredWindowSince;
+        private Vector2 panelScrollPosition;
         private bool mediaSeekDragging;
         private double mediaSeekPreviewTime;
         private bool resumeMediaAfterSeek;
+        private bool mediaSelectedThisSession;
+        private bool mediaShouldPlayWhenVisible;
+        private bool mediaPreparingForDisplay;
         private Rect panelAreaRect;
         private FileStream instanceLock;
         private bool instanceFileRegionLocked;
@@ -69,9 +93,12 @@ namespace DomeProjection
         private long projectorStartedUtcTicks;
         private float outputLaunchPendingUntil;
         private string bridgedMediaPath = string.Empty;
+        private string bridgedIdleImagePath = string.Empty;
+        private string bridgedWindowBackgroundImagePath = string.Empty;
         private long bridgedWindowId;
         private string bridgedWindowOwner = string.Empty;
         private string bridgedWindowTitle = string.Empty;
+        private int nativeWindowStateGeneration;
 
         private string SettingsPath => ProjectionProcessBridge.SettingsPath;
 
@@ -117,6 +144,11 @@ namespace DomeProjection
 #endif
                 return;
             }
+
+            if (!string.IsNullOrWhiteSpace(settings.idleImagePath))
+                OpenIdleImage(settings.idleImagePath, false);
+            if (!string.IsNullOrWhiteSpace(settings.windowBackgroundImagePath))
+                OpenWindowBackgroundImage(settings.windowBackgroundImagePath);
 
             if (projectorMode)
             {
@@ -166,12 +198,22 @@ namespace DomeProjection
             if (settings.sourceMode == 1)
             {
                 RefreshWindowList();
-                RestoreCapturedWindow();
+                if (!RestoreCapturedWindow())
+                {
+                    ClearCapturedWindowReference();
+                    settings.showIdleScreen = true;
+                    status = "取り込むウィンドウを選択してください";
+                    SaveSettings();
+                }
             }
-            else if (!string.IsNullOrWhiteSpace(settings.videoPath))
+            else
             {
-                pathField = settings.videoPath;
-                OpenMedia();
+                // Media files are deliberately session-scoped. Start on the
+                // configured standby screen until the operator selects one.
+                pathField = string.Empty;
+                settings.videoPath = string.Empty;
+                settings.showIdleScreen = true;
+                status = "動画・画像を選択してください";
             }
         }
 
@@ -283,8 +325,23 @@ namespace DomeProjection
             var source = sourceObject.AddComponent<UnityVideoSource>();
             source.Prepared += OnMediaPrepared;
             source.Failed += OnMediaFailed;
+            source.Ended += OnMediaEnded;
             video = source;
             video.AudioMuted = settings.audioMuted;
+
+            var idleObject = new GameObject("Idle Image Source");
+            idleObject.transform.SetParent(transform, false);
+            var idleSource = idleObject.AddComponent<UnityVideoSource>();
+            idleSource.Prepared += OnIdleImagePrepared;
+            idleSource.Failed += OnIdleImageFailed;
+            idleImage = idleSource;
+
+            var windowBackgroundObject = new GameObject("Window Background Image Source");
+            windowBackgroundObject.transform.SetParent(transform, false);
+            var windowBackgroundSource = windowBackgroundObject.AddComponent<UnityVideoSource>();
+            windowBackgroundSource.Prepared += OnWindowBackgroundImagePrepared;
+            windowBackgroundSource.Failed += OnWindowBackgroundImageFailed;
+            windowBackgroundImage = windowBackgroundSource;
         }
 
         private void CreateWindowCaptureSource()
@@ -314,6 +371,8 @@ namespace DomeProjection
             outputRenderer = cameraObject.AddComponent<DomeProjectionRenderer>();
             outputRenderer.Settings = settings;
             outputRenderer.VideoSource = video;
+            outputRenderer.IdleImageSource = idleImage;
+            outputRenderer.WindowBackgroundImageSource = windowBackgroundImage;
             outputRenderer.WindowSource = windowCapture;
 
             var previewObject = new GameObject("Operator Preview Camera");
@@ -331,11 +390,18 @@ namespace DomeProjection
             previewRenderer = previewObject.AddComponent<DomeProjectionRenderer>();
             previewRenderer.Settings = settings;
             previewRenderer.VideoSource = video;
+            previewRenderer.IdleImageSource = idleImage;
+            previewRenderer.WindowBackgroundImageSource = windowBackgroundImage;
             previewRenderer.WindowSource = windowCapture;
         }
 
         private void OnMediaPrepared()
         {
+            // Output must keep the standby state received from Control while its
+            // decoder catches up. Only Control decides when content is ready.
+            if (!projectorMode && mediaPreparingForDisplay && settings.sourceMode == 0)
+                settings.showIdleScreen = false;
+            mediaPreparingForDisplay = false;
             settings.videoPath = video.SourcePath;
             if (!video.IsStillImage) video.IsLooping = settings.loop;
             status = $"{(video.IsStillImage ? "画像" : "動画")}読込完了: {video.Width} × {video.Height}";
@@ -350,8 +416,17 @@ namespace DomeProjection
             if (settings.gridMode == 2) settings.gridMode = 0;
             if (!video.IsStillImage)
             {
-                if (!projectorMode || bridgeWantsMediaPlayback) video.Play();
-                else video.Pause();
+                if (projectorMode)
+                {
+                    if (settings.sourceMode == 0 && !settings.showIdleScreen && bridgeWantsMediaPlayback)
+                        video.Play();
+                    else
+                        video.Pause();
+                }
+                else
+                {
+                    ApplyControlMediaPlaybackState();
+                }
             }
             SaveSettings();
         }
@@ -361,8 +436,43 @@ namespace DomeProjection
             status = "読込エラー: " + message;
         }
 
+        private void OnMediaEnded()
+        {
+            mediaShouldPlayWhenVisible = false;
+            SetIdleScreenVisible(true);
+            status = "動画が終了したため待機画面へ切り替えました";
+            SaveSettings();
+        }
+
+        private void OnIdleImagePrepared()
+        {
+            settings.idleImagePath = idleImage.SourcePath;
+            idleImagePathField = settings.idleImagePath;
+            status = $"既定画像を読込みました: {idleImage.Width} × {idleImage.Height}";
+            SaveSettings();
+        }
+
+        private void OnIdleImageFailed(string message)
+        {
+            status = "既定画像の読込エラー: " + message;
+        }
+
+        private void OnWindowBackgroundImagePrepared()
+        {
+            settings.windowBackgroundImagePath = windowBackgroundImage.SourcePath;
+            windowBackgroundImagePathField = settings.windowBackgroundImagePath;
+            status = $"外部ウィンドウ背景を読込みました: {windowBackgroundImage.Width} × {windowBackgroundImage.Height}";
+            SaveSettings();
+        }
+
+        private void OnWindowBackgroundImageFailed(string message)
+        {
+            status = "外部ウィンドウ背景の読込エラー: " + message;
+        }
+
         private void OnWindowPrepared()
         {
+            if (!projectorMode) settings.showIdleScreen = false;
             var selected = windowCapture.SelectedWindow;
             status = selected == null
                 ? $"ウィンドウ取込完了: {windowCapture.Width} × {windowCapture.Height}"
@@ -382,9 +492,155 @@ namespace DomeProjection
             if (string.IsNullOrWhiteSpace(path)) return;
             mediaSeekDragging = false;
             resumeMediaAfterSeek = false;
+            // Keep the standby screen visible until the replacement texture is
+            // prepared. This prevents a frame from the previous file flashing.
             SetSourceMode(0);
+            mediaSelectedThisSession = true;
+            mediaShouldPlayWhenVisible = true;
+            mediaPreparingForDisplay = true;
+            settings.showIdleScreen = true;
+            pathField = path;
+            settings.videoPath = path;
             status = "素材を準備中…";
             video.Open(path);
+        }
+
+        private void OpenIdleImage(string path, bool switchToIdleImage)
+        {
+            path = path?.Trim().Trim('"') ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(path)) return;
+            var extension = Path.GetExtension(path).ToLowerInvariant();
+            if (extension != ".jpg" && extension != ".jpeg" && extension != ".png")
+            {
+                status = "既定画像にはJPEGまたはPNGを選択してください";
+                return;
+            }
+
+            settings.idleImagePath = path;
+            idleImagePathField = path;
+            if (switchToIdleImage)
+            {
+                settings.idleDisplayMode = 1;
+                SetIdleScreenVisible(true);
+            }
+            idleImage.Open(path);
+        }
+
+        private void BrowseIdleImage()
+        {
+            var selected = string.Empty;
+#if UNITY_EDITOR
+            selected = EditorUtility.OpenFilePanelWithFilters("待機画面の既定画像を選択", string.Empty,
+                new[] { "画像", "jpg,jpeg,png" });
+#elif UNITY_STANDALONE_OSX
+            selected = OpenMacMediaFilePanel(out var macDialogError);
+            if (!string.IsNullOrWhiteSpace(macDialogError)) status = macDialogError;
+#elif UNITY_STANDALONE_WIN
+            selected = OpenWindowsMediaFileDialog(out var dialogError);
+            if (!string.IsNullOrWhiteSpace(dialogError)) status = dialogError;
+#endif
+            if (!string.IsNullOrWhiteSpace(selected)) ImportIdleImage(selected);
+        }
+
+        private void ImportIdleImage(string sourcePath)
+        {
+            sourcePath = sourcePath?.Trim().Trim('"') ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(sourcePath)) return;
+            var extension = Path.GetExtension(sourcePath).ToLowerInvariant();
+            if (extension != ".jpg" && extension != ".jpeg" && extension != ".png")
+            {
+                status = "既定画像にはJPEGまたはPNGを選択してください";
+                return;
+            }
+
+            try
+            {
+                if (!File.Exists(sourcePath)) throw new FileNotFoundException("画像が見つかりません。", sourcePath);
+                var storageDirectory = Path.GetDirectoryName(SettingsPath) ?? Application.persistentDataPath;
+                Directory.CreateDirectory(storageDirectory);
+                var storedPath = Path.Combine(storageDirectory, "default-idle-image" + extension);
+                if (!string.Equals(Path.GetFullPath(sourcePath), Path.GetFullPath(storedPath),
+                        StringComparison.OrdinalIgnoreCase))
+                    File.Copy(sourcePath, storedPath, true);
+
+                OpenIdleImage(storedPath, true);
+                status = "既定画像をアプリ内へ保存しました: " + Path.GetFileName(sourcePath);
+            }
+            catch (Exception exception)
+            {
+                status = "既定画像を保存できませんでした: " + exception.Message;
+            }
+        }
+
+        private void OpenWindowBackgroundImage(string path)
+        {
+            path = path?.Trim().Trim('"') ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(path)) return;
+            var extension = Path.GetExtension(path).ToLowerInvariant();
+            if (extension != ".jpg" && extension != ".jpeg" && extension != ".png")
+            {
+                status = "外部ウィンドウ背景にはJPEGまたはPNGを選択してください";
+                return;
+            }
+
+            settings.windowBackgroundImagePath = path;
+            windowBackgroundImagePathField = path;
+            windowBackgroundImage.Open(path);
+        }
+
+        private void BrowseWindowBackgroundImage()
+        {
+            var selected = string.Empty;
+#if UNITY_EDITOR
+            selected = EditorUtility.OpenFilePanelWithFilters("外部ウィンドウの背景半球画像を選択", string.Empty,
+                new[] { "画像", "jpg,jpeg,png" });
+#elif UNITY_STANDALONE_OSX
+            selected = OpenMacMediaFilePanel(out var macDialogError);
+            if (!string.IsNullOrWhiteSpace(macDialogError)) status = macDialogError;
+#elif UNITY_STANDALONE_WIN
+            selected = OpenWindowsMediaFileDialog(out var dialogError);
+            if (!string.IsNullOrWhiteSpace(dialogError)) status = dialogError;
+#endif
+            if (!string.IsNullOrWhiteSpace(selected)) ImportWindowBackgroundImage(selected);
+        }
+
+        private void ImportWindowBackgroundImage(string sourcePath)
+        {
+            sourcePath = sourcePath?.Trim().Trim('"') ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(sourcePath)) return;
+            var extension = Path.GetExtension(sourcePath).ToLowerInvariant();
+            if (extension != ".jpg" && extension != ".jpeg" && extension != ".png")
+            {
+                status = "外部ウィンドウ背景にはJPEGまたはPNGを選択してください";
+                return;
+            }
+
+            try
+            {
+                if (!File.Exists(sourcePath)) throw new FileNotFoundException("画像が見つかりません。", sourcePath);
+                var storageDirectory = Path.GetDirectoryName(SettingsPath) ?? Application.persistentDataPath;
+                Directory.CreateDirectory(storageDirectory);
+                var storedPath = Path.Combine(storageDirectory, "window-background-image" + extension);
+                if (!string.Equals(Path.GetFullPath(sourcePath), Path.GetFullPath(storedPath),
+                        StringComparison.OrdinalIgnoreCase))
+                    File.Copy(sourcePath, storedPath, true);
+
+                OpenWindowBackgroundImage(storedPath);
+                status = "外部ウィンドウ背景をアプリ内へ保存しました: " + Path.GetFileName(sourcePath);
+            }
+            catch (Exception exception)
+            {
+                status = "外部ウィンドウ背景を保存できませんでした: " + exception.Message;
+            }
+        }
+
+        private void ClearWindowBackgroundImage()
+        {
+            settings.windowBackgroundImagePath = string.Empty;
+            windowBackgroundImagePathField = string.Empty;
+            windowBackgroundImage.Clear();
+            status = "外部ウィンドウ背景を「なし」にしました";
+            SaveSettings();
         }
 
         private void BrowseMedia()
@@ -454,6 +710,10 @@ namespace DomeProjection
         private static extern void objc_msgSend_Byte(IntPtr receiver, IntPtr selector, byte value);
         [DllImport(ObjectiveCLibrary, EntryPoint = "objc_msgSend")]
         private static extern long objc_msgSend_Long(IntPtr receiver, IntPtr selector);
+        [DllImport(ObjectiveCLibrary, EntryPoint = "objc_msgSend")]
+        private static extern byte objc_msgSend_ByteResult(IntPtr receiver, IntPtr selector);
+        [DllImport(ObjectiveCLibrary, EntryPoint = "objc_msgSend")]
+        private static extern void objc_msgSend_Void_IntPtr(IntPtr receiver, IntPtr selector, IntPtr argument);
 #endif
 
         private void SetSourceMode(int mode)
@@ -465,12 +725,38 @@ namespace DomeProjection
             if (mode == 0)
             {
                 windowCapture.StopCapture();
-                status = video.IsPrepared ? "動画・画像入力へ切り替えました" : "動画・画像を選択してください";
+                if (mediaSelectedThisSession && video.IsPrepared)
+                {
+                    pathField = video.SourcePath;
+                    settings.videoPath = video.SourcePath;
+                    settings.showIdleScreen = false;
+                    ApplyControlMediaPlaybackState();
+                    status = video.IsStillImage
+                        ? "選択済みの画像へ戻りました"
+                        : "選択済みの動画へ戻りました";
+                }
+                else
+                {
+                    video.Clear();
+                    mediaShouldPlayWhenVisible = false;
+                    mediaPreparingForDisplay = false;
+                    pathField = string.Empty;
+                    settings.videoPath = string.Empty;
+                    settings.showIdleScreen = true;
+                    bridgedMediaPath = string.Empty;
+                    status = "動画・画像を選択してください";
+                }
             }
             else
             {
+                if (video.IsPlaying) video.Pause();
                 if (windowCapture.Windows.Count == 0) RefreshWindowList();
-                status = "取り込むウィンドウを選択してください";
+                if (!RestoreCapturedWindow())
+                {
+                    ClearCapturedWindowReference();
+                    settings.showIdleScreen = true;
+                    status = "取り込むウィンドウを選択してください";
+                }
             }
         }
 
@@ -496,8 +782,7 @@ namespace DomeProjection
                 }
             }
 
-            if (selectedWindowIndex < 0 && previouslyHighlightedId > 0
-                && (!projectorMode || settings.capturedWindowId <= 0))
+            if (selectedWindowIndex < 0 && previouslyHighlightedId > 0)
             {
                 for (var index = 0; index < windowCapture.Windows.Count; index++)
                 {
@@ -507,8 +792,7 @@ namespace DomeProjection
                 }
             }
 
-            if (selectedWindowIndex < 0 && !string.IsNullOrEmpty(settings.capturedWindowOwner)
-                && (!projectorMode || settings.capturedWindowId <= 0))
+            if (selectedWindowIndex < 0 && !string.IsNullOrEmpty(settings.capturedWindowOwner))
             {
                 for (var index = 0; index < windowCapture.Windows.Count; index++)
                 {
@@ -526,19 +810,19 @@ namespace DomeProjection
                 : "取り込めるウィンドウがありません。対象アプリを開いてから更新してください。";
         }
 
-        private void RestoreCapturedWindow()
+        private bool RestoreCapturedWindow()
         {
-            if (selectedWindowIndex < 0 || selectedWindowIndex >= windowCapture.Windows.Count) return;
+            if (selectedWindowIndex < 0 || selectedWindowIndex >= windowCapture.Windows.Count) return false;
             var item = windowCapture.Windows[selectedWindowIndex];
             var idMatches = settings.capturedWindowId > 0 && item.Id == settings.capturedWindowId;
             var nameMatches = item.OwnerName == settings.capturedWindowOwner
                 && item.Title == settings.capturedWindowTitle;
             if (!idMatches && !nameMatches)
             {
-                if (projectorMode) windowCapture.StopCapture();
-                return;
+                windowCapture.StopCapture();
+                return false;
             }
-            BeginWindowCapture(item, false);
+            return BeginWindowCapture(item, false);
         }
 
         private void BeginHighlightedWindowCapture()
@@ -551,10 +835,20 @@ namespace DomeProjection
             BeginWindowCapture(windowCapture.Windows[selectedWindowIndex], false);
         }
 
-        private void BeginWindowCapture(CapturableWindow item, bool requestFocus)
+        private bool BeginWindowCapture(CapturableWindow item, bool requestFocus)
         {
+            if (video.IsPlaying) video.Pause();
             windowCapture.CaptureFps = settings.windowCaptureFps;
-            if (!windowCapture.SelectWindow(item.Id)) return;
+            if (!windowCapture.SelectWindow(item.Id))
+            {
+                if (!projectorMode)
+                {
+                    ClearCapturedWindowReference();
+                    settings.showIdleScreen = true;
+                    SaveSettings();
+                }
+                return false;
+            }
             settings.sourceMode = 1;
             settings.capturedWindowId = item.Id;
             settings.capturedWindowOwner = item.OwnerName ?? string.Empty;
@@ -562,6 +856,15 @@ namespace DomeProjection
             status = "ウィンドウの取込を開始しています…";
             focusCapturedWindowNextFrame = requestFocus;
             if (!projectorMode) SaveSettings();
+            return true;
+        }
+
+        private void ClearCapturedWindowReference()
+        {
+            windowCapture.StopCapture();
+            settings.capturedWindowId = 0L;
+            settings.capturedWindowOwner = string.Empty;
+            settings.capturedWindowTitle = string.Empty;
         }
 
         private void FocusCapturedWindow()
@@ -697,6 +1000,10 @@ namespace DomeProjection
 
         [DllImport("user32.dll")]
         private static extern IntPtr GetActiveWindow();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ShowWindow(IntPtr window, int command);
 #endif
 
         private void SetOutputDisplay(int requestedDisplay)
@@ -725,6 +1032,7 @@ namespace DomeProjection
 
         private void UpdateControlProcess()
         {
+            ApplyControlMediaPlaybackState();
             if (Application.targetFrameRate != settings.bridgeUpdateHz)
                 Application.targetFrameRate = settings.bridgeUpdateHz;
             if (Time.unscaledTime < nextBridgeUpdate) return;
@@ -740,7 +1048,8 @@ namespace DomeProjection
             {
                 sequence = ++bridgeSequence,
                 settings = settings,
-                mediaIsPlaying = video != null && video.IsPlaying,
+                mediaIsPlaying = settings.sourceMode == 0 && !settings.showIdleScreen
+                    && video != null && video.IsPlaying,
                 mediaTime = video != null ? video.Time : 0d
             });
         }
@@ -767,6 +1076,37 @@ namespace DomeProjection
             lastAppliedBridgeSequence = shared.sequence;
             bridgeWantsMediaPlayback = shared.mediaIsPlaying;
             ApplySharedSettings(shared.settings);
+
+            if (settings.sourceMode == 0 && string.IsNullOrWhiteSpace(settings.videoPath)
+                && (video.IsPrepared || !string.IsNullOrEmpty(video.SourcePath)))
+            {
+                video.Clear();
+                bridgedMediaPath = string.Empty;
+            }
+
+            // Captured windows have no audio in this app. Pause the hidden
+            // media decoder as soon as Control switches away from it so a
+            // looping video's sound cannot continue behind the presentation.
+            if ((settings.sourceMode != 0 || settings.showIdleScreen) && video.IsPlaying)
+                video.Pause();
+
+            if (settings.idleImagePath != bridgedIdleImagePath)
+            {
+                bridgedIdleImagePath = settings.idleImagePath ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(bridgedIdleImagePath))
+                    OpenIdleImage(bridgedIdleImagePath, false);
+                else
+                    idleImage.Clear();
+            }
+
+            if (settings.windowBackgroundImagePath != bridgedWindowBackgroundImagePath)
+            {
+                bridgedWindowBackgroundImagePath = settings.windowBackgroundImagePath ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(bridgedWindowBackgroundImagePath))
+                    OpenWindowBackgroundImage(bridgedWindowBackgroundImagePath);
+                else
+                    windowBackgroundImage.Clear();
+            }
 
             if (settings.sourceMode == 0)
             {
@@ -929,6 +1269,7 @@ namespace DomeProjection
             HandleWindowDropdownInput();
             GUILayout.BeginArea(panelAreaRect, panelStyle);
             GUILayout.Label("Dome Projection Control", titleStyle);
+            GUILayout.Label("Version " + Application.version, smallStyle);
             GUILayout.Label(status, smallStyle);
             DrawOutputModeBanner();
             GUILayout.Space(8f);
@@ -936,8 +1277,9 @@ namespace DomeProjection
             DrawSourceControls();
             GUILayout.Space(8f);
             DrawPanelTabs();
-            GUILayout.Space(6f);
-
+            panelScrollPosition = GUILayout.BeginScrollView(panelScrollPosition, false, false,
+                GUIStyle.none, GUI.skin.verticalScrollbar, GUILayout.ExpandHeight(true));
+            GUILayout.BeginVertical(tabContentStyle, GUILayout.ExpandHeight(true));
             switch (activePanelTab)
             {
                 case 0: DrawBasicPanel(); break;
@@ -945,20 +1287,34 @@ namespace DomeProjection
                 case 2: DrawLensPanel(); break;
                 default: DrawOutputPanel(); break;
             }
+            GUILayout.EndVertical();
+            GUILayout.EndScrollView();
 
-            GUILayout.FlexibleSpace();
+            GUILayout.Space(4f);
             if (GUILayout.Button("設定UIを隠す（Hで再表示）")) showControls = false;
             GUILayout.Space(4f);
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("設定を保存")) { SaveSettings(); status = "設定を保存しました"; }
-            if (GUILayout.Button("設定を再読込")) { LoadSettings(); status = "設定を再読込しました"; }
+            if (GUILayout.Button("設定を再読込"))
+            {
+                LoadSettings();
+                if (!string.IsNullOrWhiteSpace(settings.idleImagePath))
+                    OpenIdleImage(settings.idleImagePath, false);
+                else
+                    idleImage.Clear();
+                if (!string.IsNullOrWhiteSpace(settings.windowBackgroundImagePath))
+                    OpenWindowBackgroundImage(settings.windowBackgroundImagePath);
+                else
+                    windowBackgroundImage.Clear();
+                status = "設定を再読込しました";
+            }
             if (GUILayout.Button("アプリを終了", GUILayout.Width(90f))) QuitApplication();
             GUILayout.EndHorizontal();
 
             GUILayout.Space(4f);
             GUILayout.Label(settings.sourceMode == 1
-                ? "←/→・PgUp/PgDn: スライド移動   T: 操作先へ切替   H: UI   G: グリッド   F: 全画面   Esc: 全画面解除"
-                : "1/2/3/4: タブ   Ctrl+O: 素材選択   Space: 再生/停止   G: グリッド   H: UI   F: 全画面   Esc: 全画面解除", smallStyle);
+                ? "←/→・PgUp/PgDn: スライド移動   T: 操作先へ切替   B: 待機画面   G: ガイド   H: UI   F: 全画面   Esc: 全画面解除"
+                : "1/2/3/4: タブ   F5/F6: 素材/画面取込   Ctrl+O: 素材選択   Space: 再生/停止   B: 待機画面   G: ガイド   H: UI", smallStyle);
             GUILayout.Label($"出力 {Screen.width}×{Screen.height} / Display {settings.outputDisplay}", smallStyle);
             GUILayout.EndArea();
             if (showWindowDropdown && settings.sourceMode == 1) DrawWindowDropdown();
@@ -999,6 +1355,15 @@ namespace DomeProjection
         {
             GUILayout.Label("入力ソース");
             GUILayout.BeginHorizontal();
+            if (GUILayout.Button(settings.showIdleScreen ? "素材表示へ戻す" : "待機画面を表示"))
+                SetIdleScreenVisible(!settings.showIdleScreen);
+            var guideVisible = settings.gridMode == 1;
+            if (GUILayout.Button(guideVisible ? "●  半球ガイド表示中" : "○  半球ガイドを表示",
+                    guideVisible ? activeTabStyle : tabStyle))
+                ToggleDomeGuide();
+            GUILayout.EndHorizontal();
+            GUILayout.Space(4f);
+            GUILayout.BeginHorizontal();
             for (var index = 0; index < sourceModeNames.Length; index++)
             {
                 if (GUILayout.Toggle(settings.sourceMode == index, sourceModeNames[index], GUI.skin.button))
@@ -1030,11 +1395,18 @@ namespace DomeProjection
             {
                 GUILayout.BeginHorizontal();
                 GUI.enabled = video.IsPrepared;
-                if (GUILayout.Button(video.IsPlaying ? "一時停止" : "再生"))
+                if (GUILayout.Button(mediaShouldPlayWhenVisible ? "一時停止" : "再生"))
                 {
-                    if (video.IsPlaying) video.Pause(); else video.Play();
+                    mediaShouldPlayWhenVisible = !mediaShouldPlayWhenVisible;
+                    ApplyControlMediaPlaybackState();
                 }
-                if (GUILayout.Button("停止")) video.Stop();
+                if (GUILayout.Button("停止"))
+                {
+                    mediaShouldPlayWhenVisible = false;
+                    video.Stop();
+                    SetIdleScreenVisible(true);
+                    status = "停止して待機画面へ切り替えました";
+                }
                 GUI.enabled = true;
                 settings.loop = GUILayout.Toggle(settings.loop, "ループ", GUILayout.Width(75f));
                 settings.audioMuted = GUILayout.Toggle(settings.audioMuted, "ミュート", GUILayout.Width(82f));
@@ -1043,6 +1415,42 @@ namespace DomeProjection
 
             if (video.IsPrepared && video.Duration > 0d)
                 DrawMediaSeekBar();
+        }
+
+        private void ToggleDomeGuide()
+        {
+            // This is an overlay over the current source or standby screen;
+            // it must never replace the selected standby image.
+            settings.gridMode = settings.gridMode == 1 ? 0 : 1;
+        }
+
+        private bool IsPrimarySourcePrepared()
+        {
+            return settings.sourceMode == 1
+                ? windowCapture?.IsPrepared == true
+                : video?.IsPrepared == true;
+        }
+
+        private void SetIdleScreenVisible(bool visible)
+        {
+            settings.showIdleScreen = visible;
+            if (!projectorMode) ApplyControlMediaPlaybackState();
+        }
+
+        private void ApplyControlMediaPlaybackState()
+        {
+            if (projectorMode || video == null || video.IsStillImage || !video.IsPrepared) return;
+            var shouldPlay = settings.sourceMode == 0
+                && !settings.showIdleScreen
+                && mediaShouldPlayWhenVisible;
+            if (shouldPlay)
+            {
+                if (!video.IsPlaying) video.Play();
+            }
+            else if (video.IsPlaying)
+            {
+                video.Pause();
+            }
         }
 
         private void DrawMediaSeekBar()
@@ -1115,7 +1523,7 @@ namespace DomeProjection
             var dropdownLabel = selected == null
                 ? "（ウィンドウ未検出） ▼"
                 : TruncateLabel(selected.DisplayName, 44) + " ▼";
-            var dropdownClicked = GUILayout.Button(dropdownLabel, GUILayout.Height(28f));
+            var dropdownClicked = GUILayout.Button(dropdownLabel, dropdownButtonStyle, GUILayout.Height(28f));
             if (Event.current.type == EventType.Repaint)
                 windowDropdownAnchor = GUILayoutUtility.GetLastRect();
             if (dropdownClicked)
@@ -1147,6 +1555,19 @@ namespace DomeProjection
             GUILayout.EndHorizontal();
             GUILayout.Label("取込開始では操作先へ移動しません。必要なときだけ上の「操作先ウィンドウへ切替」またはTキーを使います。", smallStyle);
             GUILayout.Label("対象を最小化すると取込が止まります。PowerPointはウィンドウ表示のスライドショーを選ぶと操作しやすくなります。", smallStyle);
+
+            GUILayout.Space(8f);
+            GUILayout.Label("ウィンドウ外の背景（360°半球画像）");
+            GUILayout.Label("取り込んだ平面ウィンドウの周囲に表示します。画像はアプリ内へコピーして保持します。", smallStyle);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("背景画像を選択…")) BrowseWindowBackgroundImage();
+            GUI.enabled = !string.IsNullOrWhiteSpace(windowBackgroundImagePathField);
+            if (GUILayout.Button("なし", GUILayout.Width(64f))) ClearWindowBackgroundImage();
+            GUI.enabled = true;
+            GUILayout.EndHorizontal();
+            GUILayout.Label(string.IsNullOrWhiteSpace(windowBackgroundImagePathField)
+                ? "背景画像: なし（黒）"
+                : "背景画像: " + Path.GetFileName(windowBackgroundImagePathField), smallStyle);
         }
 
 #if UNITY_STANDALONE_OSX && !UNITY_EDITOR
@@ -1188,6 +1609,19 @@ namespace DomeProjection
                 Mathf.Min(windowDropdownAnchor.width, PanelWidth - 24f), height);
             var maxScroll = Mathf.Max(0f, contentHeight - visibleHeight);
             windowDropdownScroll = Mathf.Clamp(windowDropdownScroll, 0f, maxScroll);
+            var mouseInDropdown = Event.current.mousePosition - dropdownRect.position;
+            var hoveredIndex = -1;
+            if (count > 0 && mouseInDropdown.x >= 8f && mouseInDropdown.x < dropdownRect.width - 18f
+                && mouseInDropdown.y >= 8f && mouseInDropdown.y < 8f + visibleHeight)
+            {
+                var candidate = Mathf.FloorToInt((mouseInDropdown.y - 8f + windowDropdownScroll) / rowHeight);
+                if (candidate >= 0 && candidate < count) hoveredIndex = candidate;
+            }
+            if (hoveredWindowIndex != hoveredIndex)
+            {
+                hoveredWindowIndex = hoveredIndex;
+                hoveredWindowSince = Time.unscaledTime;
+            }
 
             GUI.BeginGroup(dropdownRect, GUIContent.none, panelStyle);
             if (count == 0)
@@ -1205,8 +1639,24 @@ namespace DomeProjection
                     var item = windowCapture.Windows[index];
                     var prefix = index == selectedWindowIndex ? "✓ " : "  ";
                     var rowY = 8f + index * rowHeight - windowDropdownScroll;
-                    GUI.Box(new Rect(8f, rowY, dropdownRect.width - 26f, 25f),
-                        prefix + TruncateLabel(item.DisplayName, 50), GUI.skin.button);
+                    var rowRect = new Rect(8f, rowY, dropdownRect.width - 26f, 25f);
+                    GUI.Box(rowRect, GUIContent.none,
+                        index == selectedWindowIndex ? dropdownSelectedRowStyle : dropdownRowStyle);
+
+                    var text = prefix + item.DisplayName;
+                    var clipRect = new Rect(rowRect.x + 8f, rowRect.y, rowRect.width - 16f, rowRect.height);
+                    var textWidth = dropdownLabelStyle.CalcSize(new GUIContent(text)).x;
+                    var overflow = Mathf.Max(0f, textWidth - clipRect.width);
+                    var offset = 0f;
+                    if (index == hoveredWindowIndex && overflow > 0f)
+                    {
+                        var elapsed = Mathf.Max(0f, Time.unscaledTime - hoveredWindowSince - 0.55f);
+                        offset = Mathf.PingPong(elapsed * 34f, overflow);
+                    }
+                    GUI.BeginGroup(clipRect);
+                    GUI.Label(new Rect(-offset, 0f, Mathf.Max(textWidth, clipRect.width), clipRect.height),
+                        text, dropdownLabelStyle);
+                    GUI.EndGroup();
                 }
 
                 if (maxScroll > 0f)
@@ -1281,9 +1731,15 @@ namespace DomeProjection
 
         private void DrawPanelTabs()
         {
-            GUILayout.BeginHorizontal();
+            GUILayout.BeginHorizontal(GUILayout.Height(34f));
             for (var i = 0; i < panelTabNames.Length; i++)
-                if (GUILayout.Toggle(activePanelTab == i, panelTabNames[i], GUI.skin.button)) activePanelTab = i;
+            {
+                var label = (i + 1) + "  " + panelTabNames[i];
+                var style = activePanelTab == i ? activeTabStyle : tabStyle;
+                if (!GUILayout.Button(label, style, GUILayout.ExpandWidth(true), GUILayout.Height(34f))) continue;
+                if (activePanelTab != i) panelScrollPosition = Vector2.zero;
+                activePanelTab = i;
+            }
             GUILayout.EndHorizontal();
         }
 
@@ -1383,6 +1839,55 @@ namespace DomeProjection
 
         private void DrawOutputPanel()
         {
+            GUILayout.Label("待機画面");
+            GUILayout.Label("素材未選択・動画終了・画面取込終了時に表示します。", smallStyle);
+            GUILayout.Label("待機画面の種類（どちらか1つを選択）", smallStyle);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button((settings.idleDisplayMode == 0 ? "●  " : "○  ") + "黒",
+                    settings.idleDisplayMode == 0 ? activeTabStyle : tabStyle))
+                settings.idleDisplayMode = 0;
+            if (GUILayout.Button((settings.idleDisplayMode == 1 ? "●  " : "○  ") + "既定画像",
+                    settings.idleDisplayMode == 1 ? activeTabStyle : tabStyle))
+                settings.idleDisplayMode = 1;
+            GUILayout.EndHorizontal();
+
+            GUILayout.Label("選択した画像はアプリの設定フォルダへコピーして保持します。", smallStyle);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("既定画像を変更…"))
+                BrowseIdleImage();
+            GUI.enabled = !string.IsNullOrWhiteSpace(idleImagePathField);
+            if (GUILayout.Button("再読込", GUILayout.Width(72f))) OpenIdleImage(idleImagePathField, true);
+            GUI.enabled = true;
+            GUILayout.EndHorizontal();
+            GUILayout.Label(string.IsNullOrWhiteSpace(idleImagePathField)
+                ? "保存済み画像: なし"
+                : "保存済み画像: " + Path.GetFileName(idleImagePathField), smallStyle);
+            GUILayout.Label("既定画像の表示方法（どちらか1つを選択）", smallStyle);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button((settings.idleImageIsFlat ? "○  " : "●  ") + "360°画像（半球）",
+                    settings.idleImageIsFlat ? tabStyle : activeTabStyle))
+                settings.idleImageIsFlat = false;
+            if (GUILayout.Button((settings.idleImageIsFlat ? "●  " : "○  ") + "平面画像",
+                    settings.idleImageIsFlat ? activeTabStyle : tabStyle))
+                settings.idleImageIsFlat = true;
+            GUILayout.EndHorizontal();
+            GUILayout.Label("360°画像は2:1 Equirectangular形式を半球へ展開します。", smallStyle);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("今すぐ待機画面を表示")) SetIdleScreenVisible(true);
+            if (GUILayout.Button("素材表示へ戻す")) SetIdleScreenVisible(false);
+            GUILayout.EndHorizontal();
+            if (settings.idleDisplayMode == 1 && string.IsNullOrWhiteSpace(idleImagePathField))
+                GUILayout.Label("既定画像が未選択の場合は黒を表示します。", smallStyle);
+
+            GUILayout.Space(8f);
+            GUILayout.Label("半球ガイド（現在の表示内容に重ねる）");
+            var guideVisible = settings.gridMode == 1;
+            if (GUILayout.Button(guideVisible ? "●  表示中（押すと非表示）" : "○  非表示（押すと表示）",
+                    guideVisible ? activeTabStyle : tabStyle))
+                ToggleDomeGuide();
+            GUILayout.Label("待機画像・動画・画像・外部ウィンドウのどの表示にも重ねられます。", smallStyle);
+
+            GUILayout.Space(10f);
             GUILayout.Label("画質");
             settings.brightness = Slider("明るさ", settings.brightness, 0f, 2f, settings.brightness.ToString("0.00"));
             settings.gamma = Slider("ガンマ", settings.gamma, 0.4f, 2.5f, settings.gamma.ToString("0.00"));
@@ -1462,10 +1967,47 @@ namespace DomeProjection
             windowHeightField = settings.windowHeight.ToString();
 
             var maximize = settings.startMaximized && !forceWindowed;
-            var mode = maximize ? FullScreenMode.MaximizedWindow : FullScreenMode.Windowed;
-            Screen.SetResolution(settings.windowWidth, settings.windowHeight, mode);
-            if (!maximize)
-                status = $"ウィンドウサイズ: {settings.windowWidth} × {settings.windowHeight}";
+            // Unity's MaximizedWindow enters an OS fullscreen Space on some
+            // macOS versions. Keep Control in Windowed mode and ask the native
+            // window manager to zoom/maximize the ordinary titled window.
+            Screen.SetResolution(settings.windowWidth, settings.windowHeight, FullScreenMode.Windowed);
+            var generation = ++nativeWindowStateGeneration;
+            StartCoroutine(ApplyNativeWindowState(maximize, generation));
+            status = maximize
+                ? "通常ウィンドウを最大化しました"
+                : $"ウィンドウサイズ: {settings.windowWidth} × {settings.windowHeight}";
+        }
+
+        private IEnumerator ApplyNativeWindowState(bool maximize, int generation)
+        {
+            // Screen.SetResolution and native window creation are asynchronous.
+            // A few frames also allow macOS to leave an old fullscreen Space
+            // before applying the normal window's zoom state.
+            for (var frame = 0; frame < 4; frame++) yield return null;
+            if (generation != nativeWindowStateGeneration) yield break;
+
+#if UNITY_STANDALONE_OSX && !UNITY_EDITOR
+            var applicationClass = objc_getClass("NSApplication");
+            var application = applicationClass == IntPtr.Zero
+                ? IntPtr.Zero
+                : objc_msgSend_IntPtr(applicationClass, sel_registerName("sharedApplication"));
+            if (application == IntPtr.Zero) yield break;
+
+            var window = objc_msgSend_IntPtr(application, sel_registerName("keyWindow"));
+            if (window == IntPtr.Zero)
+                window = objc_msgSend_IntPtr(application, sel_registerName("mainWindow"));
+            if (window == IntPtr.Zero) yield break;
+
+            var isZoomed = objc_msgSend_ByteResult(window, sel_registerName("isZoomed")) != 0;
+            if (isZoomed != maximize)
+                objc_msgSend_Void_IntPtr(window, sel_registerName("zoom:"), IntPtr.Zero);
+#elif UNITY_STANDALONE_WIN && !UNITY_EDITOR
+            var window = GetActiveWindow();
+            if (window == IntPtr.Zero)
+                window = Process.GetCurrentProcess().MainWindowHandle;
+            if (window != IntPtr.Zero)
+                ShowWindow(window, maximize ? 3 : 9); // SW_MAXIMIZE / SW_RESTORE
+#endif
         }
 
         private static void ConfigureProjectorDisplay()
@@ -1531,7 +2073,11 @@ namespace DomeProjection
             {
                 case KeyCode.Space:
                     if (settings.sourceMode == 1) SendSlideNavigation(true);
-                    else if (video.IsPlaying) video.Pause(); else video.Play();
+                    else
+                    {
+                        mediaShouldPlayWhenVisible = !mediaShouldPlayWhenVisible;
+                        ApplyControlMediaPlaybackState();
+                    }
                     current.Use();
                     break;
                 case KeyCode.LeftArrow:
@@ -1549,7 +2095,12 @@ namespace DomeProjection
                     current.Use();
                     break;
                 case KeyCode.G:
-                    settings.gridMode = (settings.gridMode + 1) % 3;
+                    ToggleDomeGuide();
+                    current.Use();
+                    break;
+                case KeyCode.B:
+                    SetIdleScreenVisible(!settings.showIdleScreen);
+                    status = settings.showIdleScreen ? "待機画面を表示しています" : "素材表示へ戻しました";
                     current.Use();
                     break;
                 case KeyCode.T:
@@ -1563,6 +2114,14 @@ namespace DomeProjection
                     break;
                 case KeyCode.F:
                     Screen.fullScreen = !Screen.fullScreen;
+                    current.Use();
+                    break;
+                case KeyCode.F5:
+                    SetSourceMode(0);
+                    current.Use();
+                    break;
+                case KeyCode.F6:
+                    SetSourceMode(1);
                     current.Use();
                     break;
                 case KeyCode.R:
@@ -1616,6 +2175,13 @@ namespace DomeProjection
             if (titleStyle != null) return;
 
             panelTexture = CreateSolidTexture(new Color(0.105f, 0.115f, 0.13f, 1f));
+            tabTexture = CreateSolidTexture(new Color(0.16f, 0.18f, 0.21f, 1f));
+            activeTabTexture = CreateSolidTexture(new Color(0.12f, 0.47f, 0.72f, 1f));
+            tabContentTexture = CreateSolidTexture(new Color(0.22f, 0.235f, 0.26f, 1f));
+            dropdownRowTexture = CreateSolidTexture(new Color(0.16f, 0.18f, 0.21f, 1f));
+            dropdownSelectedRowTexture = CreateSolidTexture(new Color(0.12f, 0.39f, 0.59f, 1f));
+            scrollbarTexture = CreateSolidTexture(new Color(0.16f, 0.18f, 0.2f, 1f));
+            scrollbarThumbTexture = CreateSolidTexture(new Color(0.38f, 0.62f, 0.76f, 1f));
             sliderTexture = CreateSolidTexture(new Color(0.38f, 0.41f, 0.45f, 1f));
             sliderThumbTexture = CreateSolidTexture(new Color(0.25f, 0.67f, 0.95f, 1f));
             sliderThumbActiveTexture = CreateSolidTexture(new Color(0.55f, 0.84f, 1f, 1f));
@@ -1625,6 +2191,56 @@ namespace DomeProjection
                 padding = new RectOffset(12, 12, 12, 12)
             };
             panelStyle.normal.background = panelTexture;
+
+            tabStyle = new GUIStyle(GUI.skin.button)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontSize = 12,
+                fontStyle = FontStyle.Normal,
+                padding = new RectOffset(5, 5, 6, 5),
+                margin = new RectOffset(1, 1, 0, 0)
+            };
+            tabStyle.normal.background = tabTexture;
+            tabStyle.hover.background = dropdownSelectedRowTexture;
+
+            activeTabStyle = new GUIStyle(tabStyle) { fontStyle = FontStyle.Bold };
+            activeTabStyle.normal.background = activeTabTexture;
+            activeTabStyle.hover.background = activeTabTexture;
+            activeTabStyle.active.background = activeTabTexture;
+
+            tabContentStyle = new GUIStyle(GUI.skin.box)
+            {
+                padding = new RectOffset(10, 10, 10, 12),
+                margin = new RectOffset(0, 0, 0, 0)
+            };
+            tabContentStyle.normal.background = tabContentTexture;
+
+            dropdownButtonStyle = new GUIStyle(GUI.skin.button)
+            {
+                alignment = TextAnchor.MiddleLeft,
+                padding = new RectOffset(10, 8, 4, 4)
+            };
+            dropdownRowStyle = new GUIStyle(GUI.skin.box)
+            {
+                padding = new RectOffset(0, 0, 0, 0)
+            };
+            dropdownRowStyle.normal.background = dropdownRowTexture;
+            dropdownSelectedRowStyle = new GUIStyle(dropdownRowStyle);
+            dropdownSelectedRowStyle.normal.background = dropdownSelectedRowTexture;
+            dropdownLabelStyle = new GUIStyle(GUI.skin.label)
+            {
+                alignment = TextAnchor.MiddleLeft,
+                padding = new RectOffset(0, 0, 0, 0),
+                clipping = TextClipping.Clip
+            };
+
+            GUI.skin.verticalScrollbar.fixedWidth = 10f;
+            GUI.skin.verticalScrollbar.normal.background = scrollbarTexture;
+            GUI.skin.verticalScrollbar.hover.background = scrollbarTexture;
+            GUI.skin.verticalScrollbar.active.background = scrollbarTexture;
+            GUI.skin.verticalScrollbarThumb.normal.background = scrollbarThumbTexture;
+            GUI.skin.verticalScrollbarThumb.hover.background = sliderThumbActiveTexture;
+            GUI.skin.verticalScrollbarThumb.active.background = sliderThumbActiveTexture;
 
             sliderStyle = new GUIStyle(GUI.skin.horizontalSlider)
             {
@@ -1676,6 +2292,8 @@ namespace DomeProjection
                 settings.Migrate();
                 settings.Clamp();
                 pathField = settings.videoPath ?? string.Empty;
+                idleImagePathField = settings.idleImagePath ?? string.Empty;
+                windowBackgroundImagePathField = settings.windowBackgroundImagePath ?? string.Empty;
                 if (!string.IsNullOrEmpty(pathField) && !pathField.Contains("://")
                     && !File.Exists(pathField) && pathField.Contains("??"))
                 {
@@ -1690,6 +2308,8 @@ namespace DomeProjection
             catch (Exception exception)
             {
                 settings = new DomeProjectionSettings();
+                idleImagePathField = string.Empty;
+                windowBackgroundImagePathField = string.Empty;
                 status = "設定読込エラー: " + exception.Message;
             }
 
@@ -1703,6 +2323,8 @@ namespace DomeProjection
             try
             {
                 settings.videoPath = pathField;
+                settings.idleImagePath = idleImagePathField;
+                settings.windowBackgroundImagePath = windowBackgroundImagePathField;
                 Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath) ?? Application.persistentDataPath);
                 File.WriteAllText(SettingsPath, JsonUtility.ToJson(settings, true));
             }

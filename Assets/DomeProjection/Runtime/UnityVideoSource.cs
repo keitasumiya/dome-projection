@@ -10,6 +10,7 @@ namespace DomeProjection
     {
         public event Action Prepared;
         public event Action<string> Failed;
+        public event Action Ended;
 
         private VideoPlayer player;
         private Texture2D imageTexture;
@@ -61,6 +62,7 @@ namespace DomeProjection
             player.prepareCompleted += OnPrepared;
             player.seekCompleted += OnSeekCompleted;
             player.errorReceived += OnError;
+            player.loopPointReached += OnLoopPointReached;
         }
 
         private void OnDestroy()
@@ -70,6 +72,7 @@ namespace DomeProjection
                 player.prepareCompleted -= OnPrepared;
                 player.seekCompleted -= OnSeekCompleted;
                 player.errorReceived -= OnError;
+                player.loopPointReached -= OnLoopPointReached;
             }
             DestroyImageTexture();
         }
@@ -146,6 +149,18 @@ namespace DomeProjection
             player.Stop();
         }
 
+        public void Clear()
+        {
+            seekInProgress = false;
+            resumeAfterSeek = false;
+            imagePrepared = false;
+            sourcePath = string.Empty;
+            DestroyImageTexture();
+            if (player == null) return;
+            player.Stop();
+            player.url = string.Empty;
+        }
+
         private void OpenImage(string path)
         {
             Texture2D texture = null;
@@ -219,6 +234,11 @@ namespace DomeProjection
             seekInProgress = false;
             resumeAfterSeek = false;
             Failed?.Invoke(message);
+        }
+
+        private void OnLoopPointReached(VideoPlayer _)
+        {
+            if (player != null && !player.isLooping) Ended?.Invoke();
         }
     }
 }
