@@ -1,0 +1,24 @@
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+
+# Large local test videos. Keep the directory, but never commit its contents.
+[Ll]ocal[Vv]ideos/*
+![Ll]ocal[Vv]ideos/.gitkeep
+
+.DS_Store
+*.csproj
+*.sln
+*.user
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
