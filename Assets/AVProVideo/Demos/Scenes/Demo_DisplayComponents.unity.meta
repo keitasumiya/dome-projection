@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 4313ef3d8aef8764ea98fd3a15361c9b
+timeCreated: 1601367920
+licenseType: Store
+DefaultImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Demos/Scenes/Demo_DisplayComponents.unity
+  uploadId: 649715

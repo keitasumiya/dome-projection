@@ -1,0 +1,12 @@
+fileFormatVersion: 2
+guid: 8ebaafdbf44b0b9489f20bc27374d187
+ShaderImporter:
+  defaultTextures: []
+  userData: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Runtime/Shaders/Resources/AVProVideo-Internal-BlendFrames.shader
+  uploadId: 649715

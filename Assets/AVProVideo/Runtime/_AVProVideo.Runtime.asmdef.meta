@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 3ca842002c51d0a43b73e45298809a13
+timeCreated: 1546681457
+licenseType: Store
+DefaultImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Runtime/_AVProVideo.Runtime.asmdef
+  uploadId: 649715

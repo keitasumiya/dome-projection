@@ -1,0 +1,12 @@
+fileFormatVersion: 2
+guid: 1ca6555d94ddb204c87e9fe549085b3c
+ShaderImporter:
+  defaultTextures: []
+  userData: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Runtime/Shaders/AVProVideo-Unlit.shader
+  uploadId: 649715

@@ -90,6 +90,14 @@ namespace DomeProjection
             var useWindowBackground = usePrimary && useWindow
                 && WindowBackgroundImageSource?.Texture != null
                 && WindowBackgroundImageSource.IsPrepared;
+            var selectedMediaSource = usePrimary && !useWindow
+                ? VideoSource
+                : !usePrimary && useIdleImage ? IdleImageSource : null;
+            // AVPro's native decoders can expose top-down textures. Combine the
+            // backend correction with the operator's explicit flip as XOR so
+            // image and video orientation use the same dome convention.
+            var effectiveFlipY = Settings.flipInputY
+                ^ (selectedMediaSource?.RequiresVerticalFlip ?? false);
 
             material.SetTexture(VideoTex, hasVideo ? texture : Texture2D.blackTexture);
             material.SetFloat(HasVideo, hasVideo ? 1f : 0f);
@@ -110,7 +118,7 @@ namespace DomeProjection
             material.SetVector(DirectionalWarp, new Vector4(Settings.warpTop, Settings.warpBottom, Settings.warpLeft, Settings.warpRight));
             material.SetVector(ColorAdjust, new Vector4(Settings.brightness, Settings.gamma, 0f, 0f));
             material.SetFloat(EdgeFade, Settings.edgeFade);
-            material.SetVector(InputFlip, new Vector4(Settings.flipInputX ? 1f : 0f, Settings.flipInputY ? 1f : 0f, 0f, 0f));
+            material.SetVector(InputFlip, new Vector4(Settings.flipInputX ? 1f : 0f, effectiveFlipY ? 1f : 0f, 0f, 0f));
             material.SetFloat(GridMode, Settings.gridMode);
             material.SetVector(GridSettings, new Vector4(Settings.gridStepDegrees, Settings.gridOpacity, 15f, Settings.showOrientationMarkers ? 1f : 0f));
             material.SetVector(GridAppearance, new Vector4(Settings.gridLineWidth, 0f, 0f, 0f));

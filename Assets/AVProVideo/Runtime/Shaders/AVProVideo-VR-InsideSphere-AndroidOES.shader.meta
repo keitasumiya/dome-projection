@@ -1,0 +1,12 @@
+fileFormatVersion: 2
+guid: a22a9f37cda6a3b48be178ec57376024
+ShaderImporter:
+  defaultTextures: []
+  userData: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Runtime/Shaders/AVProVideo-VR-InsideSphere-AndroidOES.shader
+  uploadId: 649715

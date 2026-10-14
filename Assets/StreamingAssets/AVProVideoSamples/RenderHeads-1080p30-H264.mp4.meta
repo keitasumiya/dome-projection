@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 7a3e4cd0845b37541a474f6796073db5
+timeCreated: 1611251028
+licenseType: Store
+DefaultImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/StreamingAssets/AVProVideoSamples/RenderHeads-1080p30-H264.mp4
+  uploadId: 649715

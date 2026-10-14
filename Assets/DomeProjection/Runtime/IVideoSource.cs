@@ -17,6 +17,7 @@ namespace DomeProjection
         bool IsStillImage { get; }
         bool IsPlaying { get; }
         bool IsSeeking { get; }
+        bool RequiresVerticalFlip { get; }
         bool AudioMuted { get; set; }
         bool IsLooping { get; set; }
         double Time { get; set; }
@@ -28,6 +29,7 @@ namespace DomeProjection
         void Open(string path);
         void Play();
         void Pause();
+        void SeekPreview(double time);
         void Seek(double time, bool resumePlayback);
         void Stop();
         void Clear();

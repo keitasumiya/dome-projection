@@ -1,0 +1,18 @@
+fileFormatVersion: 2
+guid: 876043e54db05b045a4c75425318e3f1
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Extensions/VisualEffectGraph/ApplyToVfxGraph.cs
+  uploadId: 649715

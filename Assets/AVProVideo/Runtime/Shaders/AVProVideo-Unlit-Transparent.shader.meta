@@ -1,0 +1,12 @@
+fileFormatVersion: 2
+guid: 0ed1fb9218ad96f49acfdb428d5b5aab
+ShaderImporter:
+  defaultTextures: []
+  userData: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Runtime/Shaders/AVProVideo-Unlit-Transparent.shader
+  uploadId: 649715

@@ -1,0 +1,16 @@
+fileFormatVersion: 2
+guid: d7bb9d4ea887e4041877356986247bba
+ShaderImporter:
+  externalObjects: {}
+  defaultTextures: []
+  nonModifiableTextures: []
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Runtime/Shaders/AVProVideo-Skybox-Sphere.shader
+  uploadId: 649715

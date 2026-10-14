@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 114ac842bfcaf0745a5e45cb2a7d6559
+MonoImporter:
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Editor/Scripts/Components/ApplyToMeshEditor.cs
+  uploadId: 649715

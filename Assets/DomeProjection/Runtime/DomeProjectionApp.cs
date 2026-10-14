@@ -19,9 +19,9 @@ namespace DomeProjection
         private const float PanelWidth = 440f;
         private const float ReferenceUiHeight = 900f;
         private const float VideoPathWidth = 288f;
-        // Aim for a 30 fps scrub preview. UnityVideoSource coalesces requests if
-        // the hardware decoder cannot complete them at this rate.
-        private const float SeekPreviewInterval = 1f / 30f;
+        // AVPro's native decoder accepts approximate preview seeks continuously;
+        // match a typical display refresh rate while the pointer is dragged.
+        private const float SeekPreviewInterval = 1f / 60f;
         private readonly string[] gridModeNames = { "なし", "素材に重ねる", "校正パターン" };
         private readonly string[] panelTabNames = { "配置", "校正", "レンズ", "出力／投影" };
         private readonly string[] sourceModeNames = { "動画・画像", "外部ウィンドウ" };
@@ -91,6 +91,7 @@ namespace DomeProjection
         private bool projectorMode;
         private bool permissionSetupMode;
         private bool bridgeWantsMediaPlayback;
+        private bool bridgeWasScrubbing;
         private float nextBridgeUpdate;
         private float nextHeartbeatUpdate;
         private float nextMediaResyncAllowed;
@@ -328,9 +329,9 @@ namespace DomeProjection
 
         private void CreateVideoSource()
         {
-            var sourceObject = new GameObject("Unity Video Source");
+            var sourceObject = new GameObject("AVPro Video Source");
             sourceObject.transform.SetParent(transform, false);
-            var source = sourceObject.AddComponent<UnityVideoSource>();
+            var source = sourceObject.AddComponent<AVProVideoSource>();
             source.Prepared += OnMediaPrepared;
             source.Failed += OnMediaFailed;
             source.Ended += OnMediaEnded;
@@ -1139,7 +1140,14 @@ namespace DomeProjection
                     var timeError = Math.Abs(video.Time - shared.mediaTime);
                     if (shared.mediaIsScrubbing)
                     {
-                        if (timeError > 0.02d) video.Seek(shared.mediaTime, false);
+                        if (timeError > 0.02d) video.SeekPreview(shared.mediaTime);
+                    }
+                    else if (bridgeWasScrubbing)
+                    {
+                        // One exact seek on release corrects the approximate
+                        // keyframe/tolerance seeks used during dragging.
+                        nextMediaResyncAllowed = Time.unscaledTime + 2f;
+                        video.Seek(shared.mediaTime, shared.mediaIsPlaying);
                     }
                     else if (timeError > 0.75d && Time.unscaledTime >= nextMediaResyncAllowed)
                     {
@@ -1149,9 +1157,11 @@ namespace DomeProjection
                     if (shared.mediaIsPlaying && !video.IsPlaying) video.Play();
                     else if (!shared.mediaIsPlaying && video.IsPlaying) video.Pause();
                 }
+                bridgeWasScrubbing = shared.mediaIsScrubbing;
             }
             else
             {
+                bridgeWasScrubbing = false;
                 var windowChanged = settings.capturedWindowId != bridgedWindowId
                     || settings.capturedWindowOwner != bridgedWindowOwner
                     || settings.capturedWindowTitle != bridgedWindowTitle;
@@ -1508,10 +1518,9 @@ namespace DomeProjection
                 {
                     nextSeekPreviewTime = Time.unscaledTime + SeekPreviewInterval;
                     lastSeekPreviewTarget = mediaSeekPreviewTime;
-                    // Preview the frame while keeping audio paused. Requests are
-                    // coalesced inside UnityVideoSource if decoding is slower
-                    // than pointer movement.
-                    video.Seek(mediaSeekPreviewTime, false);
+                    // Approximate native seek for immediate visual feedback. An
+                    // exact seek is issued once when the pointer is released.
+                    video.SeekPreview(mediaSeekPreviewTime);
                 }
             }
             GUILayout.Label(FormatTime(displayedTime) + " / " + FormatTime(video.Duration),

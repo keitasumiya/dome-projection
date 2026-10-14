@@ -1,0 +1,16 @@
+fileFormatVersion: 2
+guid: 329f34b49d9d2e941951589b296d042a
+timeCreated: 1634745134
+licenseType: Store
+ShaderImporter:
+  defaultTextures: []
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Runtime/Shaders/AVProVideo-Unlit-Transparent-AndroidOES.shader
+  uploadId: 649715

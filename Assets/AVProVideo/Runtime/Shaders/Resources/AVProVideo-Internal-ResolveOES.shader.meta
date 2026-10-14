@@ -1,0 +1,16 @@
+fileFormatVersion: 2
+guid: 7f39a07505493c248b3129e08feb50c4
+timeCreated: 1600887843
+licenseType: Store
+ShaderImporter:
+  defaultTextures: []
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Runtime/Shaders/Resources/AVProVideo-Internal-ResolveOES.shader
+  uploadId: 649715

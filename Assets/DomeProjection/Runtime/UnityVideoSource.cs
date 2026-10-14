@@ -31,6 +31,9 @@ namespace DomeProjection
         public bool IsStillImage => imagePrepared;
         public bool IsPlaying => !imagePrepared && player != null && player.isPlaying;
         public bool IsSeeking => !imagePrepared && (seekInProgress || resumePending);
+        // Unity's VideoPlayer and ImageConversion textures already use the same
+        // UV convention as the dome shader.
+        public bool RequiresVerticalFlip => false;
         public bool AudioMuted
         {
             get => audioMuted;
@@ -164,6 +167,11 @@ namespace DomeProjection
             resumeAfterSeek = resumePlayback;
             if (seekInProgress) return;
             BeginPendingSeek();
+        }
+
+        public void SeekPreview(double time)
+        {
+            Seek(time, false);
         }
 
         private void BeginPendingSeek()

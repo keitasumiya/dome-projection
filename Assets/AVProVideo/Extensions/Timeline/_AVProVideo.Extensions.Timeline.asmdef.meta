@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 417edd1c17e270f4a9afe6e95eff9b6e
+timeCreated: 1591797492
+licenseType: Store
+DefaultImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Extensions/Timeline/_AVProVideo.Extensions.Timeline.asmdef
+  uploadId: 649715

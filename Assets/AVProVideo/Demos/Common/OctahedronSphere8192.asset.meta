@@ -1,0 +1,16 @@
+fileFormatVersion: 2
+guid: 7ea26c1ee23534e45906e4c8dd184883
+timeCreated: 1609503535
+licenseType: Store
+NativeFormatImporter:
+  mainObjectFileID: -1
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Demos/Common/OctahedronSphere8192.asset
+  uploadId: 649715

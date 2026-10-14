@@ -1,0 +1,16 @@
+fileFormatVersion: 2
+guid: 9c4b497c86e965b4e8a37e8aa70b2fe0
+timeCreated: 1592334546
+licenseType: Store
+NativeFormatImporter:
+  mainObjectFileID: 11400000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Demos/SampleMedia/Sample-Local-MP4-Cones.asset
+  uploadId: 649715

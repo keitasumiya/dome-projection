@@ -1,0 +1,12 @@
+fileFormatVersion: 2
+guid: d077c188d5d1c7c4f82531e47eb896a9
+ShaderImporter:
+  defaultTextures: []
+  userData: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Runtime/Shaders/AVProVideo-VR-InsideSphere-Transparent-AndroidOES.shader
+  uploadId: 649715

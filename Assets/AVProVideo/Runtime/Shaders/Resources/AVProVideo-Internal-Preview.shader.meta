@@ -1,0 +1,16 @@
+fileFormatVersion: 2
+guid: 1df272a1da1d6814eb2be42cad7516f2
+timeCreated: 1600887843
+licenseType: Store
+ShaderImporter:
+  defaultTextures: []
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Runtime/Shaders/Resources/AVProVideo-Internal-Preview.shader
+  uploadId: 649715

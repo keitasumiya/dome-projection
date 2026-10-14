@@ -1,0 +1,18 @@
+fileFormatVersion: 2
+guid: 56fb02c4efc59ef4a8b6328867f1a0bc
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Editor/Scripts/MediaReferenceEditor.cs
+  uploadId: 649715

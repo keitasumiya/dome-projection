@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: c9328411ef862884f97a993c4daa9b68
+MonoImporter:
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Editor/Scripts/Components/PlaylistMediaPlayerEditor.cs
+  uploadId: 649715

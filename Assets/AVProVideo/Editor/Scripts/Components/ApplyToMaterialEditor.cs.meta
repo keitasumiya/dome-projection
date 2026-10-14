@@ -1,0 +1,19 @@
+fileFormatVersion: 2
+guid: 60268ddd706f2f1469acb32edab1dea9
+timeCreated: 1591790256
+licenseType: Store
+MonoImporter:
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Editor/Scripts/Components/ApplyToMaterialEditor.cs
+  uploadId: 649715

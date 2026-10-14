@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: cdef6ca7b14eb064b90edf1d7dbba6d1
+timeCreated: 1607543899
+licenseType: Store
+TextScriptImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/AVProVideo/Licenses/HapInAvFoundation-License.txt
+  uploadId: 649715

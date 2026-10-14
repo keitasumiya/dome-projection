@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 7527b43fd045ed54696948590f83aa55
+MovieImporter:
+  serializedVersion: 1
+  quality: .5
+  linearTexture: 0
+  userData: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 184294
+  packageName: AVPro Video - Ultra Edition
+  packageVersion: 2.9.3
+  assetPath: Assets/StreamingAssets/AVProVideoSamples/BigBuckBunny-360p30-H264.mp4
+  uploadId: 649715
