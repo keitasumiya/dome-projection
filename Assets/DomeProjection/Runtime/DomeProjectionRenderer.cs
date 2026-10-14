@@ -12,18 +12,29 @@ namespace DomeProjection
         private static readonly int Radius = Shader.PropertyToID("_Radius");
         private static readonly int Ellipse = Shader.PropertyToID("_Ellipse");
         private static readonly int Orientation = Shader.PropertyToID("_Orientation");
+        private static readonly int DomeFov = Shader.PropertyToID("_DomeFov");
         private static readonly int OutputRotation = Shader.PropertyToID("_OutputRotation");
         private static readonly int Radial = Shader.PropertyToID("_Radial");
+        private static readonly int Tangential = Shader.PropertyToID("_Tangential");
+        private static readonly int DirectionalWarp = Shader.PropertyToID("_DirectionalWarp");
         private static readonly int ColorAdjust = Shader.PropertyToID("_ColorAdjust");
         private static readonly int EdgeFade = Shader.PropertyToID("_EdgeFade");
         private static readonly int InputFlip = Shader.PropertyToID("_InputFlip");
         private static readonly int GridMode = Shader.PropertyToID("_GridMode");
+        private static readonly int GridSettings = Shader.PropertyToID("_GridSettings");
+        private static readonly int GridAppearance = Shader.PropertyToID("_GridAppearance");
+        private static readonly int ContentMode = Shader.PropertyToID("_ContentMode");
+        private static readonly int SourceAspect = Shader.PropertyToID("_SourceAspect");
+        private static readonly int FlatPlacement = Shader.PropertyToID("_FlatPlacement");
+        private static readonly int FlatSize = Shader.PropertyToID("_FlatSize");
+        private static readonly int FlatCrop = Shader.PropertyToID("_FlatCrop");
 
         private Material material;
         private Camera outputCamera;
 
         public DomeProjectionSettings Settings { get; set; }
         public IVideoSource VideoSource { get; set; }
+        public IWindowCaptureSource WindowSource { get; set; }
 
         private void Awake()
         {
@@ -55,8 +66,12 @@ namespace DomeProjection
             }
 
             Settings.Clamp();
-            var texture = VideoSource?.Texture;
-            var hasVideo = texture != null && VideoSource.IsPrepared;
+            var useWindow = Settings.sourceMode == 1;
+            var texture = useWindow ? WindowSource?.Texture : VideoSource?.Texture;
+            var hasVideo = texture != null && (useWindow ? WindowSource.IsPrepared : VideoSource.IsPrepared);
+            var sourceWidth = useWindow ? WindowSource?.Width ?? 0 : VideoSource?.Width ?? 0;
+            var sourceHeight = useWindow ? WindowSource?.Height ?? 0 : VideoSource?.Height ?? 0;
+            var flatContent = useWindow || Settings.fileIsFlat;
 
             material.SetTexture(VideoTex, hasVideo ? texture : Texture2D.blackTexture);
             material.SetFloat(HasVideo, hasVideo ? 1f : 0f);
@@ -67,12 +82,24 @@ namespace DomeProjection
             material.SetFloat(Radius, Settings.radius);
             material.SetVector(Ellipse, new Vector4(Settings.ellipseX, Settings.ellipseY, 0f, 0f));
             material.SetVector(Orientation, new Vector4(Settings.yaw, Settings.pitch, Settings.roll, 0f));
+            material.SetFloat(DomeFov, Settings.domeFov);
             material.SetFloat(OutputRotation, Settings.outputRotation);
-            material.SetVector(Radial, new Vector4(Settings.radialK1, Settings.radialK2, 0f, 0f));
+            material.SetVector(Radial, new Vector4(Settings.radialK1, Settings.radialK2, Settings.radialK3, 0f));
+            material.SetVector(Tangential, new Vector4(Settings.tangentialP1, Settings.tangentialP2, 0f, 0f));
+            material.SetVector(DirectionalWarp, new Vector4(Settings.warpTop, Settings.warpBottom, Settings.warpLeft, Settings.warpRight));
             material.SetVector(ColorAdjust, new Vector4(Settings.brightness, Settings.gamma, 0f, 0f));
             material.SetFloat(EdgeFade, Settings.edgeFade);
             material.SetVector(InputFlip, new Vector4(Settings.flipInputX ? 1f : 0f, Settings.flipInputY ? 1f : 0f, 0f, 0f));
             material.SetFloat(GridMode, hasVideo ? Settings.gridMode : 2f);
+            material.SetVector(GridSettings, new Vector4(Settings.gridStepDegrees, Settings.gridOpacity, 15f, Settings.showOrientationMarkers ? 1f : 0f));
+            material.SetVector(GridAppearance, new Vector4(Settings.gridLineWidth, 0f, 0f, 0f));
+            material.SetFloat(ContentMode, flatContent ? 1f : 0f);
+            material.SetFloat(SourceAspect, sourceHeight > 0 ? (float)sourceWidth / sourceHeight : 16f / 9f);
+            material.SetVector(FlatPlacement, new Vector4(Settings.flatAzimuth, Settings.flatPolarAngle,
+                Settings.flatRoll, Settings.flatHorizontalFov));
+            material.SetVector(FlatSize, new Vector4(Settings.flatHeightScale, 0f, 0f, 0f));
+            material.SetVector(FlatCrop, new Vector4(Settings.flatCropLeft, Settings.flatCropRight,
+                Settings.flatCropBottom, Settings.flatCropTop));
 
             Graphics.Blit(source, destination, material, 0);
         }

@@ -6,42 +6,126 @@ Unityで2:1の正距円筒図法（equirectangular）360°動画を、単眼180�
 
 - Unity 6.3 LTS（プロジェクト作成時の指定: 6000.3.26f1）
 - macOSまたはWindows
-- 入力動画: 2:1 equirectangular、MP4/H.264を推奨
+- 入力素材: 2:1 equirectangular。動画はMP4/H.264、静止画はJPEG/PNGを推奨
 
 Unity Hubでこのフォルダーをプロジェクトとして追加し、`Assets/Scenes/Main.unity`を開いて再生してください。シーンは空ですが、起動時にプレイヤー、出力カメラ、操作画面が自動生成されます。
 
-ビルド済みアプリは通常のファイル選択に加え、検証や展示の自動起動用に動画をコマンドライン指定できます。
+ビルドは操作用の`DomeProjectionControl`と投影専用の`DomeProjectionOutput`の2アプリです。
+通常はControlだけを開き、画面上部の「投影を開始」を押します。
+ControlはPC画面から移動せず、Outputだけが第2画面で全画面表示されます。
+
+Controlは通常のファイル選択に加え、検証や展示の自動起動用に動画・画像をコマンドライン指定できます。
 
 ```sh
-open Builds/DomeProjectionPlayer.app --args --video /absolute/path/to/video.mp4
+open Builds/DomeProjectionControl.app --args --video /absolute/path/to/video.mp4
+open Builds/DomeProjectionControl.app --args --image /absolute/path/to/image.jpg
+open Builds/DomeProjectionControl.app --args --window "PowerPoint"
 ```
 
 ## 現在の機能
 
 - Unity標準 `VideoPlayer` によるローカル動画再生
+- シークバーのドラッグ表示をデコード処理から分離し、確定後も音声付きで再生を継続
+- 動画音声の再生とミュート切替（Output投影中はControl側の音声を自動停止）
+- JPEG / PNGの360°画像表示
+- PowerPoint、PDFビューア、ブラウザなど、指定した外部ウィンドウのリアルタイム取込
+- 外部ウィンドウをスクロール可能なプルダウン一覧から選択
+- 外部ウィンドウをドーム上で矩形に見せる平面資料投影
+- 平面資料を上半球向けに180°回転した初期配置
+- 平面資料の位置、回転、画角、縦倍率、四辺クロップ
+- 取込開始ではフォーカスを移動せず、明示操作時だけ対象ウィンドウへ切替
+- 日本語・空白を含むファイル名に対応
 - 2:1 equirectangularから180°円形ドームマスターへのGPU変換
+- ドーム画角を90〜220°で調整（標準180°）
 - Yaw / Pitch / Roll
 - 出力円の中心、半径、縦横倍率、回転
-- FC-E8実測用の放射歪み係数 K1 / K2
+- FC-E8実測用の放射歪み係数 K1 / K2 / K3と非対称補正 P1 / P2
+- 上・下・左・右を独立調整する方向別補正（複数レンズや偏心配置向け）
 - 明るさ、ガンマ、円周フェード
-- 15°同心円・15°放射線の校正パターン
-- 複数ディスプレイ出力
+- 1°・2°・5°・10°・15°から選べる校正グリッド（15°ごとに強調）
+- スクロール不要の「配置／校正／レンズ／投影」タブUI
+- 天頂向きを初期表示し、Pitchを±180°で調整
+- 通常起動はOSフルスクリーンではない最大化ウィンドウ
+- ウィンドウの手動リサイズ、幅・高さ入力、解像度プリセット
+- 低い画面解像度では操作UIを自動縮小（スクロールバーなし）
+- 操作専用Controlアプリと、UIを持たない投影専用Outputアプリ
+- ControlからOutputをワンクリックで起動・終了
+- 設定、素材、再生・一時停止、再生位置をlocalhost限定UDPで2アプリ間同期（30 / 60 / 120Hz切替）
 - 設定のJSON保存
-- EditorおよびmacOSビルドでのファイル選択
+- 保存済み動画を次回起動時に自動読込・再生
+- Hキーまたは画面内ボタンによる設定UIの表示／非表示
+- 画面内の終了ボタンとEscキーによる終了
+- アプリの二重起動防止
+- Editor、macOS、Windowsビルドでのファイル選択
 
-設定は `Application.persistentDataPath/dome-projection-settings.json` に保存されます。
+設定はControlとOutputの共通Application Supportフォルダー内にJSONで保存されます。
+旧macOS版で日本語部分が`?`として保存された素材パスは復元できないため、最新版では自動消去されます。一度だけ素材を選び直してください。
 
 ## キー操作
 
 | キー | 動作 |
 | --- | --- |
 | Space | 再生 / 一時停止 |
+| Ctrl+O / Command+O | 動画・画像を選択 |
 | G | グリッド表示切替 |
-| H | 操作パネル表示切替 |
+| H | 設定UIの表示 / 非表示 |
 | F | 全画面切替 |
 | R | 幾何補正を初期化 |
+| Esc | 全画面表示を解除（ウィンドウ表示中は何もしない） |
+| 1 / 2 / 3 / 4 | 配置／校正／レンズ／投影タブ |
+| ← / →、PageUp / PageDown | 取込中ウィンドウへ前／次の操作を送信 |
+| T | 取込中ウィンドウを前面にして、通常のマウス・キーボード操作へ切替 |
 
-## 動画の準備
+設定UIを隠している間は、左クリックで次へ、右クリックで前へ進めます。
+
+## PowerPoint・PDF・外部ウィンドウ
+
+1. PowerPointなど、表示したいアプリを先に開く
+2. 入力ソースで「外部ウィンドウ」を選択する
+3. プルダウンから対象を選び、「取込開始」を押す
+4. 「配置」タブで平面資料の位置と大きさを合わせる
+5. 「操作先ウィンドウへ切替」を押し、PowerPointを通常どおり操作する
+
+PowerPointは「出席者として閲覧する（ウィンドウ表示）」のスライドショーを使うと、
+投影アプリと同じPC上で扱いやすくなります。取込対象は最小化しないでください。
+
+macOSでは「外部ウィンドウ」の取込とスライド操作のため、画面収録とアクセシビリティの許可が必要です。
+Controlの初回起動時に必要な許可をまとめて要求します。ControlとOutputは別アプリなので、
+画面収録の設定画面には別々に表示されます。初回設定ではOutputも権限登録専用モードで短時間起動します。
+許可を拒否した場合や後から変更する場合は、外部ウィンドウ欄の「必要な権限をまとめて設定」を使えます。
+許可後は対象アプリを一度終了して再起動してください。Unity標準のアドホック署名は再ビルドごとに
+CDHashが変わるため、以前はmacOSが毎回別アプリと判定していました。現在のMacビルド処理は
+開発用の指定要件をBundle IDへ固定します。この変更後のビルドでControlとOutputを一度ずつ許可すれば、
+以後の開発ビルドでも許可を引き継げます。本番配布時はDeveloper ID証明書で署名してください。
+Windowsでは通常のデスクトップウィンドウを対象にできます。管理者権限で起動したアプリを
+取り込む場合は、このアプリ側にも同等の権限が必要になることがあります。
+
+「前へ／次へ」ボタンや矢印キーの転送とは別に、「操作先ウィンドウへ切替」またはTキーで
+対象アプリを前面にすれば、マウス操作、文字入力、PowerPoint固有のショートカットを
+そのまま利用できます。
+
+## 本番投影の推奨構成
+
+OSのディスプレイ設定は「ミラーリング」ではなく「拡張」にします。利用者が行う操作は次の2つだけです。
+
+1. `DomeProjectionControl`を開く
+2. 画面上部の「投影を開始」を押す
+
+ControlはPC画面に残り、Outputだけがプロジェクター側へ全画面表示されます。投影を止める場合も
+Control上部の「投影を終了」を押します。Outputを直接操作する必要はありません。
+ControlとOutputの通信はファイル監視ではなく、同じPC内のlocalhost UDPを使います。
+同期頻度は「投影」タブで30 / 60 / 120Hzから選べます。標準は60Hzです。
+外部ネットワークへの送信は行いません。
+
+説明時は次の流れを想定しています。
+
+1. 「外部ウィンドウ」でPowerPointのウィンドウ表示スライドショーを取り込む
+2. プルダウンや前／次ボタン、またはTキーでPowerPointを操作する
+3. 説明後に「動画・画像」へ切り替え、360°動画または360°静止画を再生する
+
+プロジェクター側は投影専用画面なので、素材切替や校正中の設定UIをお客さんに見せずに操作できます。
+
+## 素材の準備
 
 Insta360 StudioやGoPro Playerでスティッチした後、次を目安に書き出します。
 
@@ -52,7 +136,10 @@ Insta360 StudioやGoPro Playerでスティッチした後、次を目安に書�
 
 独自形式の `.insv` や `.360` は直接読みません。
 
-容量の大きい検証用動画は、プロジェクト直下の `LocalVideos/` に置いてください。このフォルダー内の動画は `.gitignore` でGit管理対象外になっています。
+静止画はJPEG/JPG/PNGを直接読み込めます。動画と同じ2:1 equirectangular画像が適しています。
+たとえば3840×2160の16:9画像も表示できますが、2:1ではないため警告を表示し、ドーム上では縦方向の対応が正しくなりません。
+
+容量の大きい検証用素材は、プロジェクト直下の `LocalVideos/` に置いてください。このフォルダー内は `.gitignore` でGit管理対象外になっています。
 
 例:
 
@@ -63,8 +150,27 @@ LocalVideos/GoProMAX-test-5.6K.mp4
 アプリを起動して「選択」から動画を指定するか、次のように起動します。
 
 ```sh
-open Builds/DomeProjectionPlayer.app --args --video "$PWD/LocalVideos/GoProMAX-test-5.6K.mp4"
+open Builds/DomeProjectionControl.app --args --video "$PWD/LocalVideos/GoProMAX-test-5.6K.mp4"
 ```
+
+## Windows版のビルドと実行
+
+Unity HubでUnity 6.3 LTSの「Windows Build Support」を追加してから、Unity Editorの
+`Dome Projection > Build Windows x86_64`を実行します。出力先は
+Controlは`Builds/Windows/Control/DomeProjectionControl.exe`、Outputは
+`Builds/Windows/Output/DomeProjectionOutput.exe`です。2フォルダーを同じ親フォルダーに置いてください。
+
+Windows版でも「選択」ボタンからMP4/MOV/M4V/JPEG/PNGを選択できます。日本語や空白を含むパスと、コマンドライン指定にも対応しています。
+
+```powershell
+.\DomeProjectionControl.exe --video "D:\Videos\GoProMAX-test.mp4"
+.\DomeProjectionControl.exe --image "D:\Images\360写真.jpg"
+.\DomeProjectionControl.exe --window "PowerPoint"
+```
+
+GoPro MAXなどのHEVC/H.265動画は、Windows側にHEVCデコーダーがないとUnity標準VideoPlayerで
+再生できません。本番PCで再生できない場合はMicrosoft Storeの「HEVC ビデオ拡張機能」を導入するか、
+H.264 MP4へ変換してください。5.3K以上の動画はGPUのデコード上限も実機で確認してください。
 
 ## AVPro Videoについて
 
@@ -76,9 +182,12 @@ AVPro Video 2.xはDeprecatedのため、最初からプロジェクトへイン�
 
 1. 動画を読み込まず、校正パターンを表示する
 2. 円の中心と半径を調整して、投影円をレンズ光軸へ合わせる
-3. ドーム上の15°リング位置を確認する
-4. `放射補正 K1` と `K2` でリング間隔を合わせる
-5. 必要なら横倍率・縦倍率・出力回転を調整する
-6. 設定を保存する
+3. `ドーム画角`をレンズとドームが実際に覆う角度へ合わせる
+4. まず5°グリッドで全体を確認し、必要なら1°または2°へ切り替える
+5. `放射補正 K1`〜`K3`で同心円の間隔を合わせる
+6. 左右・上下で歪み方が異なる場合は`偏心 P1`・`P2`を調整する
+7. レンズを複数重ねた場合など、特定方向だけリング間隔が違うときは方向別の`上／下／左／右`を調整する
+8. 必要なら横倍率・縦倍率・出力回転を調整する
+9. 設定を保存する
 
-K1/K2だけで補正できない非対称歪みが確認された場合は、次段階でメッシュワープを追加します。
+P1/P2まで使っても局所的な凹凸が残る場合は、次段階で格子点を直接動かすメッシュワープを追加します。

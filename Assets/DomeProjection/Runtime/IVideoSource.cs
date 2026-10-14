@@ -13,7 +13,9 @@ namespace DomeProjection
 
         Texture Texture { get; }
         bool IsPrepared { get; }
+        bool IsStillImage { get; }
         bool IsPlaying { get; }
+        bool AudioMuted { get; set; }
         bool IsLooping { get; set; }
         double Time { get; set; }
         double Duration { get; }
@@ -24,6 +26,7 @@ namespace DomeProjection
         void Open(string path);
         void Play();
         void Pause();
+        void Seek(double time, bool resumePlayback);
         void Stop();
     }
 }
