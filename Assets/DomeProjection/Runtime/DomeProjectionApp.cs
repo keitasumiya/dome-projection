@@ -19,6 +19,7 @@ namespace DomeProjection
     {
         private const float PanelWidth = 500f;
         private const float ReferenceUiHeight = 900f;
+        private const int TransportWindowId = 0x44A1;
         private const float VideoPathWidth = 288f;
         // AVPro's native decoder accepts approximate preview seeks continuously;
         // match a typical display refresh rate while the pointer is dragged.
@@ -27,6 +28,8 @@ namespace DomeProjection
         private const string LensProfileInputName = "text-input-lens-profile";
         private const string MaterialNameInputName = "text-input-material-name";
         private const string PlaylistNameInputName = "text-input-playlist-name";
+        private const string MaterialRenameInputName = "text-input-material-rename";
+        private const string PlaylistRenameInputName = "text-input-playlist-rename";
         private const string WindowWidthInputName = "text-input-window-width";
         private const string WindowHeightInputName = "text-input-window-height";
         private readonly string[] gridModeNames = { "なし", "素材に重ねる", "校正パターン" };
@@ -59,6 +62,11 @@ namespace DomeProjection
         private DomePlaylistCatalog playlistCatalog = new DomePlaylistCatalog();
         private string materialNameField = string.Empty;
         private string playlistNameField = string.Empty;
+        private string editingMaterialId = string.Empty;
+        private string editingMaterialName = string.Empty;
+        private string editingPlaylistId = string.Empty;
+        private string editingPlaylistName = string.Empty;
+        private string pendingNameEditFocus = string.Empty;
         private int selectedMaterialIndex = -1;
         private int selectedPlaylistIndex = -1;
         private int selectedPlaylistEntryIndex = -1;
@@ -117,7 +125,6 @@ namespace DomeProjection
         private bool showWindowDropdown;
         private float windowDropdownScroll;
         private Rect windowDropdownAnchor;
-        private bool consumeWindowDropdownMouseUp;
         private int hoveredWindowIndex = -1;
         private float hoveredWindowSince;
         private Vector2 panelScrollPosition;
@@ -131,6 +138,8 @@ namespace DomeProjection
         private bool mediaPreparingForDisplay;
         private bool showLensCalibrationHelp;
         private bool drawLargeTransportOverlay;
+        private Rect transportWindowRect;
+        private bool transportWindowPositionInitialized;
         private float pendingPlaylistSeekFraction = -1f;
         private string pendingPlaylistSeekMaterialId = string.Empty;
         private bool pendingPlaylistSeekShouldPlay = true;
@@ -1674,19 +1683,40 @@ namespace DomeProjection
 
         private void DrawTransportOverlay(float logicalWidth, float logicalHeight, float margin)
         {
-            // Keep playback controls at the actual horizontal center of the
-            // application window. Their position must not jump when the setup
-            // panel is moved between the left and right sides.
             var availableWidth = logicalWidth - margin * 2f;
             if (availableWidth < 500f) return;
 
             var hasActivePlaylist = activePlaylistIndex >= 0
                                     && activePlaylistIndex < playlistCatalog.playlists.Count;
             var width = Mathf.Min(760f, availableWidth - 32f);
-            var height = hasActivePlaylist ? 150f : 96f;
-            var area = new Rect((logicalWidth - width) * 0.5f,
-                logicalHeight - height - margin, width, height);
-            GUILayout.BeginArea(area, sectionStyle);
+            var height = hasActivePlaylist ? 178f : 124f;
+            if (!transportWindowPositionInitialized)
+            {
+                // The position is intentionally session-only. Every launch
+                // starts from the familiar centered lower edge.
+                transportWindowRect = new Rect((logicalWidth - width) * 0.5f,
+                    logicalHeight - height - margin, width, height);
+                transportWindowPositionInitialized = true;
+            }
+            else
+            {
+                transportWindowRect.width = width;
+                transportWindowRect.height = height;
+            }
+
+            ClampTransportWindow(logicalWidth, logicalHeight, margin);
+            transportWindowRect = GUI.Window(TransportWindowId, transportWindowRect,
+                DrawTransportWindowContents, GUIContent.none, sectionStyle);
+            ClampTransportWindow(logicalWidth, logicalHeight, margin);
+        }
+
+        private void DrawTransportWindowContents(int windowId)
+        {
+            GUILayout.Label("再生コントロール（ここをドラッグして移動）", smallStyle,
+                GUILayout.Height(22f));
+
+            var hasActivePlaylist = activePlaylistIndex >= 0
+                                    && activePlaylistIndex < playlistCatalog.playlists.Count;
 
             GUILayout.BeginHorizontal(GUILayout.Height(28f));
             if (hasActivePlaylist)
@@ -1740,7 +1770,18 @@ namespace DomeProjection
                 DrawPlaylistSeekBar(playlistCatalog.playlists[activePlaylistIndex], activePlaylistIndex, true);
             else if (video != null && video.IsPrepared && !video.IsStillImage && video.Duration > 0d)
                 DrawMediaSeekBar();
-            GUILayout.EndArea();
+
+            // Only the dedicated top strip moves the floating panel, leaving
+            // every playback button and seek bar free to receive drag input.
+            GUI.DragWindow(new Rect(0f, 0f, transportWindowRect.width, 30f));
+        }
+
+        private void ClampTransportWindow(float logicalWidth, float logicalHeight, float margin)
+        {
+            var maximumX = Mathf.Max(margin, logicalWidth - transportWindowRect.width - margin);
+            var maximumY = Mathf.Max(margin, logicalHeight - transportWindowRect.height - margin);
+            transportWindowRect.x = Mathf.Clamp(transportWindowRect.x, margin, maximumX);
+            transportWindowRect.y = Mathf.Clamp(transportWindowRect.y, margin, maximumY);
         }
 
         private void DrawPanelVisibilityToggle(float logicalWidth, float margin)
@@ -2103,10 +2144,7 @@ namespace DomeProjection
             const float rowHeight = 27f;
             var contentHeight = count * rowHeight;
             var visibleHeight = count == 0 ? 32f : Mathf.Min(270f, contentHeight);
-            var height = visibleHeight + 16f;
-            var dropdownRect = new Rect(panelAreaRect.x + windowDropdownAnchor.x,
-                panelAreaRect.y + windowDropdownAnchor.yMax + 2f,
-                Mathf.Min(windowDropdownAnchor.width, PanelWidth - 24f), height);
+            var dropdownRect = GetWindowDropdownRect(visibleHeight);
             var maxScroll = Mathf.Max(0f, contentHeight - visibleHeight);
             windowDropdownScroll = Mathf.Clamp(windowDropdownScroll, 0f, maxScroll);
             var mouseInDropdown = GetLogicalMousePosition() - dropdownRect.position;
@@ -2173,25 +2211,20 @@ namespace DomeProjection
 
         private void HandleWindowDropdownInput()
         {
-            var rawEventType = Event.current.rawType;
-            if (consumeWindowDropdownMouseUp && rawEventType == EventType.MouseUp)
-            {
-                consumeWindowDropdownMouseUp = false;
-                Event.current.Use();
-                return;
-            }
             if (!showWindowDropdown) return;
 
             const float rowHeight = 27f;
             var count = windowCapture.Windows.Count;
             var contentHeight = count * rowHeight;
             var visibleHeight = count == 0 ? 32f : Mathf.Min(270f, contentHeight);
-            var dropdownRect = new Rect(panelAreaRect.x + windowDropdownAnchor.x,
-                panelAreaRect.y + windowDropdownAnchor.yMax + 2f,
-                Mathf.Min(windowDropdownAnchor.width, PanelWidth - 24f), visibleHeight + 16f);
-            var mousePosition = GetLogicalMousePosition();
+            var dropdownRect = GetWindowDropdownRect(visibleHeight);
+            var rawEventType = Event.current.rawType;
+            var logicalMousePosition = GetLogicalMousePosition();
+            var directMousePosition = Event.current.mousePosition;
+            var mouseInside = dropdownRect.Contains(logicalMousePosition)
+                              || dropdownRect.Contains(directMousePosition);
 
-            if (rawEventType == EventType.ScrollWheel && dropdownRect.Contains(mousePosition))
+            if (rawEventType == EventType.ScrollWheel && mouseInside)
             {
                 var maxScroll = Mathf.Max(0f, contentHeight - visibleHeight);
                 windowDropdownScroll = Mathf.Clamp(windowDropdownScroll + Event.current.delta.y * rowHeight,
@@ -2199,29 +2232,46 @@ namespace DomeProjection
                 Event.current.Use();
                 return;
             }
-            if (rawEventType != EventType.MouseDown || Event.current.button != 0) return;
 
-            if (dropdownRect.Contains(mousePosition) && count > 0
-                && mousePosition.x < dropdownRect.xMax - 16f)
+            // Process the rows before drawing the normal panel. Unity's own
+            // button hit-testing then accounts for GUI.matrix/UI scaling and
+            // captures the click before controls underneath the popup can do so.
+            if (count > 0)
             {
-                var localY = mousePosition.y - dropdownRect.y - 8f + windowDropdownScroll;
-                var index = Mathf.FloorToInt(localY / rowHeight);
-                if (index >= 0 && index < count)
+                var first = Mathf.Max(0, Mathf.FloorToInt(windowDropdownScroll / rowHeight));
+                var last = Mathf.Min(count - 1,
+                    Mathf.CeilToInt((windowDropdownScroll + visibleHeight) / rowHeight));
+                for (var index = first; index <= last; index++)
                 {
-                    selectedWindowIndex = index;
-                    status = "選択: " + windowCapture.Windows[index].DisplayName;
-                    showWindowDropdown = false;
+                    var rowY = dropdownRect.y + 8f + index * rowHeight - windowDropdownScroll;
+                    var rowRect = new Rect(dropdownRect.x + 8f, rowY,
+                        dropdownRect.width - 26f, 25f);
+                    if (!GUI.Button(rowRect, GUIContent.none, GUIStyle.none)) continue;
+                    SelectWindowCandidate(index);
+                    return;
                 }
             }
-            else
+
+            if (rawEventType == EventType.MouseDown && Event.current.button == 0 && !mouseInside)
             {
                 showWindowDropdown = false;
+                Event.current.Use();
             }
+        }
 
-            // The list is rendered after the ordinary panel so it appears on top.
-            // Consume both halves of the click here before controls behind it see it.
-            consumeWindowDropdownMouseUp = true;
-            Event.current.Use();
+        private Rect GetWindowDropdownRect(float visibleHeight)
+        {
+            return new Rect(panelAreaRect.x + windowDropdownAnchor.x,
+                panelAreaRect.y + windowDropdownAnchor.yMax + 2f,
+                Mathf.Min(windowDropdownAnchor.width, PanelWidth - 24f), visibleHeight + 16f);
+        }
+
+        private void SelectWindowCandidate(int index)
+        {
+            if (index < 0 || index >= windowCapture.Windows.Count) return;
+            selectedWindowIndex = index;
+            status = "選択: " + windowCapture.Windows[index].DisplayName;
+            showWindowDropdown = false;
         }
 
         private static string TruncateLabel(string value, int maximumCharacters)
@@ -2711,9 +2761,9 @@ namespace DomeProjection
                 materialNameField = selectedMaterialIndex >= 0
                     ? materialCatalog.materials[selectedMaterialIndex].name
                     : string.Empty;
-                playlistNameField = selectedPlaylistIndex >= 0
-                    ? playlistCatalog.playlists[selectedPlaylistIndex].name
-                    : string.Empty;
+                playlistNameField = string.Empty;
+                CancelMaterialNameEdit();
+                CancelPlaylistNameEdit();
                 selectedPlaylistEntryIndex = -1;
                 activePlaylistIndex = -1;
                 activePlaylistEntryIndex = -1;
@@ -2782,7 +2832,6 @@ namespace DomeProjection
                          && selectedMaterialIndex < materialCatalog.materials.Count
                          && selectedPlaylistIndex >= 0
                          && selectedPlaylistIndex < playlistCatalog.playlists.Count;
-            GUILayout.BeginVertical(sectionStyle);
             GUI.enabled = canAdd;
             var destination = canAdd
                 ? playlistCatalog.playlists[selectedPlaylistIndex].name
@@ -2791,12 +2840,12 @@ namespace DomeProjection
                     GUILayout.Height(32f)))
                 AddSelectedMaterialToPlaylist();
             GUI.enabled = true;
-            GUILayout.EndVertical();
         }
 
         private void DrawMaterialLibraryControls()
         {
             BeginSection("素材リスト（materials.json）");
+            GUILayout.Label("素材名（新規登録・現在値更新用）", smallStyle);
             GUI.SetNextControlName(MaterialNameInputName);
             materialNameField = GUILayout.TextField(materialNameField ?? string.Empty);
             GUILayout.Label("名前を入力し、現在選択中のファイルと表示設定を登録します。", smallStyle);
@@ -2812,15 +2861,43 @@ namespace DomeProjection
             selectedMaterialIndex = Mathf.Clamp(selectedMaterialIndex, 0, materialCatalog.materials.Count - 1);
             GUILayout.Label("登録素材を選択", smallStyle);
             var materialClicked = -1;
+            var materialEditClicked = -1;
+            var saveMaterialEdit = false;
+            var cancelMaterialEdit = false;
             for (var i = 0; i < materialCatalog.materials.Count; i++)
             {
                 var item = materialCatalog.materials[i];
                 var label = (i + 1) + ". " + TruncateLabel(item.name, 38);
-                if (GUILayout.Button(label, i == selectedMaterialIndex ? selectedListButtonStyle : dropdownButtonStyle,
-                        GUILayout.Height(26f)))
-                    materialClicked = i;
+                GUILayout.BeginHorizontal(GUILayout.Height(26f));
+                if (string.Equals(item.id, editingMaterialId, StringComparison.Ordinal))
+                {
+                    GUI.SetNextControlName(MaterialRenameInputName);
+                    editingMaterialName = GUILayout.TextField(editingMaterialName ?? string.Empty,
+                        GUILayout.Height(26f), GUILayout.ExpandWidth(true));
+                    FocusPendingNameEdit(MaterialRenameInputName);
+                    if (GUILayout.Button(new GUIContent("✓", "素材名を保存"),
+                            GUILayout.Width(30f), GUILayout.Height(26f)))
+                        saveMaterialEdit = true;
+                    if (GUILayout.Button(new GUIContent("↶", "編集をキャンセル"),
+                            GUILayout.Width(30f), GUILayout.Height(26f)))
+                        cancelMaterialEdit = true;
+                }
+                else
+                {
+                    if (GUILayout.Button(label,
+                            i == selectedMaterialIndex ? selectedListButtonStyle : dropdownButtonStyle,
+                            GUILayout.Height(26f), GUILayout.ExpandWidth(true)))
+                        materialClicked = i;
+                    if (GUILayout.Button(new GUIContent("✎", "この素材名を編集"),
+                            GUILayout.Width(30f), GUILayout.Height(26f)))
+                        materialEditClicked = i;
+                }
+                GUILayout.EndHorizontal();
             }
             if (materialClicked >= 0) SelectMaterial(materialClicked);
+            if (materialEditClicked >= 0) BeginMaterialNameEdit(materialEditClicked);
+            if (saveMaterialEdit) SaveMaterialNameEdit();
+            if (cancelMaterialEdit) CancelMaterialNameEdit();
 
             var selected = materialCatalog.materials[selectedMaterialIndex];
             GUILayout.Label(TruncateLabel(selected.path, 58), smallStyle);
@@ -2848,6 +2925,7 @@ namespace DomeProjection
         private void DrawPlaylistControls()
         {
             BeginSection("プレイリスト（playlists.json）");
+            GUILayout.Label("新規プレイリスト名", smallStyle);
             GUILayout.BeginHorizontal();
             GUI.SetNextControlName(PlaylistNameInputName);
             playlistNameField = GUILayout.TextField(playlistNameField ?? string.Empty, GUILayout.ExpandWidth(true));
@@ -2864,37 +2942,47 @@ namespace DomeProjection
             selectedPlaylistIndex = Mathf.Clamp(selectedPlaylistIndex, 0, playlistCatalog.playlists.Count - 1);
             GUILayout.Label("プレイリストを選択", smallStyle);
             var playlistClicked = -1;
-            var playlistRenameClicked = -1;
+            var playlistEditClicked = -1;
+            var savePlaylistEdit = false;
+            var cancelPlaylistEdit = false;
             var playlistDeleteClicked = -1;
             for (var i = 0; i < playlistCatalog.playlists.Count; i++)
             {
                 var item = playlistCatalog.playlists[i];
                 var label = (i + 1) + ". " + TruncateLabel(item.name, 38);
                 GUILayout.BeginHorizontal(GUILayout.Height(26f));
-                if (GUILayout.Button(label, i == selectedPlaylistIndex ? selectedListButtonStyle : dropdownButtonStyle,
-                        GUILayout.Height(26f), GUILayout.ExpandWidth(true)))
-                    playlistClicked = i;
-                if (GUILayout.Button(new GUIContent("✎", "上の名前欄の内容で更新"),
-                        GUILayout.Width(30f), GUILayout.Height(26f)))
-                    playlistRenameClicked = i;
-                if (GUILayout.Button(new GUIContent("✕", "このプレイリストを削除"),
-                        GUILayout.Width(30f), GUILayout.Height(26f)))
-                    playlistDeleteClicked = i;
-                GUILayout.EndHorizontal();
-            }
-            if (playlistClicked >= 0) SelectPlaylist(playlistClicked);
-            if (playlistRenameClicked >= 0)
-            {
-                if (playlistRenameClicked != selectedPlaylistIndex)
+                if (string.Equals(item.id, editingPlaylistId, StringComparison.Ordinal))
                 {
-                    SelectPlaylist(playlistRenameClicked);
-                    status = "上の名前欄を編集し、もう一度✎を押してください";
+                    GUI.SetNextControlName(PlaylistRenameInputName);
+                    editingPlaylistName = GUILayout.TextField(editingPlaylistName ?? string.Empty,
+                        GUILayout.Height(26f), GUILayout.ExpandWidth(true));
+                    FocusPendingNameEdit(PlaylistRenameInputName);
+                    if (GUILayout.Button(new GUIContent("✓", "プレイリスト名を保存"),
+                            GUILayout.Width(30f), GUILayout.Height(26f)))
+                        savePlaylistEdit = true;
+                    if (GUILayout.Button(new GUIContent("↶", "編集をキャンセル"),
+                            GUILayout.Width(30f), GUILayout.Height(26f)))
+                        cancelPlaylistEdit = true;
                 }
                 else
                 {
-                    RenameSelectedPlaylist();
+                    if (GUILayout.Button(label,
+                            i == selectedPlaylistIndex ? selectedListButtonStyle : dropdownButtonStyle,
+                            GUILayout.Height(26f), GUILayout.ExpandWidth(true)))
+                        playlistClicked = i;
+                    if (GUILayout.Button(new GUIContent("✎", "このプレイリスト名を編集"),
+                            GUILayout.Width(30f), GUILayout.Height(26f)))
+                        playlistEditClicked = i;
+                    if (GUILayout.Button(new GUIContent("✕", "このプレイリストを削除"),
+                            GUILayout.Width(30f), GUILayout.Height(26f)))
+                        playlistDeleteClicked = i;
                 }
+                GUILayout.EndHorizontal();
             }
+            if (playlistClicked >= 0) SelectPlaylist(playlistClicked);
+            if (playlistEditClicked >= 0) BeginPlaylistNameEdit(playlistEditClicked);
+            if (savePlaylistEdit) SavePlaylistNameEdit();
+            if (cancelPlaylistEdit) CancelPlaylistNameEdit();
             if (playlistDeleteClicked >= 0)
             {
                 if (playlistDeleteClicked != selectedPlaylistIndex) SelectPlaylist(playlistDeleteClicked);
@@ -3226,7 +3314,6 @@ namespace DomeProjection
             selectedPlaylistIndex = playlistIndex;
             selectedPlaylistEntryIndex = entryIndex;
             activePlaylistCompleted = false;
-            playlistNameField = playlist.name;
             settings.showIdleScreen = false;
             playlistSeekPreviewEntryIndex = entryIndex;
             playlistSeekPreviewFraction = fraction;
@@ -3342,7 +3429,53 @@ namespace DomeProjection
             selectedMaterialIndex = (index % materialCatalog.materials.Count + materialCatalog.materials.Count)
                                     % materialCatalog.materials.Count;
             materialNameField = materialCatalog.materials[selectedMaterialIndex].name;
+            CancelMaterialNameEdit();
             CancelContentDelete();
+        }
+
+        private void BeginMaterialNameEdit(int index)
+        {
+            if (index < 0 || index >= materialCatalog.materials.Count) return;
+            selectedMaterialIndex = index;
+            var material = materialCatalog.materials[index];
+            editingMaterialId = material.id;
+            editingMaterialName = material.name;
+            pendingNameEditFocus = MaterialRenameInputName;
+            CancelContentDelete();
+            status = "素材名を編集し、✓で保存してください";
+        }
+
+        private void SaveMaterialNameEdit()
+        {
+            var index = materialCatalog.materials.FindIndex(item =>
+                string.Equals(item.id, editingMaterialId, StringComparison.Ordinal));
+            if (index < 0) { CancelMaterialNameEdit(); return; }
+            var name = (editingMaterialName ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                status = "素材名を入力してください";
+                return;
+            }
+
+            var previousName = materialCatalog.materials[index].name;
+            materialCatalog.materials[index].name = name;
+            selectedMaterialIndex = index;
+            materialNameField = name;
+            if (!SaveMaterialCatalog())
+            {
+                materialCatalog.materials[index].name = previousName;
+                materialNameField = previousName;
+                return;
+            }
+            CancelMaterialNameEdit();
+            status = "素材名を更新しました: " + name;
+        }
+
+        private void CancelMaterialNameEdit()
+        {
+            editingMaterialId = string.Empty;
+            editingMaterialName = string.Empty;
+            if (pendingNameEditFocus == MaterialRenameInputName) pendingNameEditFocus = string.Empty;
         }
 
         private void LoadMaterial(DomeMaterialDefinition item, bool keepActivePlaylist)
@@ -3382,6 +3515,7 @@ namespace DomeProjection
             activePlaylistIndex = -1;
             activePlaylistEntryIndex = -1;
             activePlaylistCompleted = false;
+            CancelMaterialNameEdit();
             CancelContentDelete();
             SaveMaterialCatalog();
             SavePlaylistCatalog();
@@ -3405,23 +3539,60 @@ namespace DomeProjection
             playlistCatalog.playlists.Add(playlist);
             selectedPlaylistIndex = playlistCatalog.playlists.Count - 1;
             selectedPlaylistEntryIndex = -1;
-            SavePlaylistCatalog();
+            if (!SavePlaylistCatalog()) return;
+            playlistNameField = string.Empty;
             status = "プレイリストを作成しました: " + name;
         }
 
-        private void RenameSelectedPlaylist()
+        private void BeginPlaylistNameEdit(int index)
         {
-            if (selectedPlaylistIndex < 0 || selectedPlaylistIndex >= playlistCatalog.playlists.Count) return;
-            var name = (playlistNameField ?? string.Empty).Trim();
+            if (index < 0 || index >= playlistCatalog.playlists.Count) return;
+            selectedPlaylistIndex = index;
+            var playlist = playlistCatalog.playlists[index];
+            editingPlaylistId = playlist.id;
+            editingPlaylistName = playlist.name;
+            pendingNameEditFocus = PlaylistRenameInputName;
+            selectedPlaylistEntryIndex = playlist.materialIds.Count == 0 ? -1 : 0;
+            CancelContentDelete();
+            status = "プレイリスト名を編集し、✓で保存してください";
+        }
+
+        private void SavePlaylistNameEdit()
+        {
+            var index = playlistCatalog.playlists.FindIndex(item =>
+                string.Equals(item.id, editingPlaylistId, StringComparison.Ordinal));
+            if (index < 0) { CancelPlaylistNameEdit(); return; }
+            var name = (editingPlaylistName ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(name))
             {
                 status = "プレイリスト名を入力してください";
                 return;
             }
 
-            playlistCatalog.playlists[selectedPlaylistIndex].name = name;
-            SavePlaylistCatalog();
+            var previousName = playlistCatalog.playlists[index].name;
+            playlistCatalog.playlists[index].name = name;
+            selectedPlaylistIndex = index;
+            if (!SavePlaylistCatalog())
+            {
+                playlistCatalog.playlists[index].name = previousName;
+                return;
+            }
+            CancelPlaylistNameEdit();
             status = "プレイリスト名を更新しました: " + name;
+        }
+
+        private void CancelPlaylistNameEdit()
+        {
+            editingPlaylistId = string.Empty;
+            editingPlaylistName = string.Empty;
+            if (pendingNameEditFocus == PlaylistRenameInputName) pendingNameEditFocus = string.Empty;
+        }
+
+        private void FocusPendingNameEdit(string controlName)
+        {
+            if (!string.Equals(pendingNameEditFocus, controlName, StringComparison.Ordinal)) return;
+            GUI.FocusControl(controlName);
+            pendingNameEditFocus = string.Empty;
         }
 
         private void SelectPlaylist(int index)
@@ -3435,8 +3606,8 @@ namespace DomeProjection
             selectedPlaylistIndex = (index % playlistCatalog.playlists.Count + playlistCatalog.playlists.Count)
                                     % playlistCatalog.playlists.Count;
             var playlist = playlistCatalog.playlists[selectedPlaylistIndex];
-            playlistNameField = playlist.name;
             selectedPlaylistEntryIndex = playlist.materialIds.Count == 0 ? -1 : 0;
+            CancelPlaylistNameEdit();
             CancelContentDelete();
         }
 
@@ -3788,9 +3959,7 @@ namespace DomeProjection
                 ? -1
                 : Mathf.Clamp(selectedPlaylistIndex, 0, playlistCatalog.playlists.Count - 1);
             selectedPlaylistEntryIndex = -1;
-            playlistNameField = selectedPlaylistIndex >= 0
-                ? playlistCatalog.playlists[selectedPlaylistIndex].name
-                : string.Empty;
+            CancelPlaylistNameEdit();
             activePlaylistIndex = -1;
             activePlaylistEntryIndex = -1;
             activePlaylistCompleted = false;
@@ -3805,27 +3974,31 @@ namespace DomeProjection
             pendingContentDeleteId = string.Empty;
         }
 
-        private void SaveMaterialCatalog()
+        private bool SaveMaterialCatalog()
         {
             try
             {
                 configurationStore.SaveMaterials(materialCatalog);
+                return true;
             }
             catch (Exception exception)
             {
                 status = "materials.jsonの保存エラー: " + exception.Message;
+                return false;
             }
         }
 
-        private void SavePlaylistCatalog()
+        private bool SavePlaylistCatalog()
         {
             try
             {
                 configurationStore.SavePlaylists(playlistCatalog);
+                return true;
             }
             catch (Exception exception)
             {
                 status = "playlists.jsonの保存エラー: " + exception.Message;
+                return false;
             }
         }
 
@@ -4226,6 +4399,8 @@ namespace DomeProjection
                    || focused == LensProfileInputName
                    || focused == MaterialNameInputName
                    || focused == PlaylistNameInputName
+                   || focused == MaterialRenameInputName
+                   || focused == PlaylistRenameInputName
                    || focused == WindowWidthInputName
                    || focused == WindowHeightInputName;
         }

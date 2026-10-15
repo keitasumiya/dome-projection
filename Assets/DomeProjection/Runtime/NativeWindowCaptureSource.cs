@@ -558,6 +558,14 @@ namespace DomeProjection
             EnumWindows((window, _) =>
             {
                 if (!IsWindowVisible(window) || IsIconic(window)) return true;
+                if (DwmGetWindowAttribute(window, DwmWindowAttributeCloaked,
+                        out var cloaked, Marshal.SizeOf<int>()) == 0 && cloaked != 0)
+                    return true;
+                // WDA_MONITOR and WDA_EXCLUDEFROMCAPTURE both deliberately
+                // prevent normal desktop capture, so neither belongs in the UI.
+                if (GetWindowDisplayAffinity(window, out var displayAffinity)
+                    && displayAffinity != 0)
+                    return true;
                 GetWindowThreadProcessId(window, out var processIdValue);
                 if (processIdValue == 0 || processIdValue == ownProcessId) return true;
 
@@ -684,6 +692,7 @@ namespace DomeProjection
         private const ushort DispatchPropertyGet = 0x2;
         private static readonly int NativeVariantSize = IntPtr.Size == 8 ? 24 : 16;
         private const uint PrintWindowRenderFullContent = 0x00000002;
+        private const int DwmWindowAttributeCloaked = 14;
         private const uint DibRgbColors = 0;
         private const uint BitmapCompressionRgb = 0;
         private const uint SourceCopy = 0x00CC0020;
@@ -811,6 +820,10 @@ namespace DomeProjection
         [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
         [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
         [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr window);
+        [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(
+            IntPtr window, int attribute, out int value, int valueSize);
+        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetWindowDisplayAffinity(IntPtr window, out uint affinity);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextLengthW(IntPtr window);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextW(IntPtr window, StringBuilder text, int maximumCount);
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
@@ -847,7 +860,8 @@ namespace DomeProjection
 #if UNITY_STANDALONE_OSX || UNITY_EDITOR_OSX
         private void EnumerateWindowsMac(List<CapturableWindow> destination)
         {
-            var array = CGWindowListCopyWindowInfo(WindowListOptionAll | WindowListExcludeDesktopElements, 0);
+            var array = CGWindowListCopyWindowInfo(
+                WindowListOptionOnScreenOnly | WindowListExcludeDesktopElements, 0);
             if (array == IntPtr.Zero) return;
             try
             {
@@ -860,7 +874,15 @@ namespace DomeProjection
                     var windowId = GetDictionaryInt(dictionary, "kCGWindowNumber");
                     var processId = GetDictionaryInt(dictionary, "kCGWindowOwnerPID");
                     var layer = GetDictionaryInt(dictionary, "kCGWindowLayer");
-                    if (windowId <= 0 || processId <= 0 || processId == ownProcessId || layer != 0) continue;
+                    var sharingState = GetDictionaryInt(dictionary, "kCGWindowSharingState");
+                    var isOnScreen = GetDictionaryInt(dictionary, "kCGWindowIsOnscreen");
+                    if (windowId <= 0 || processId <= 0 || processId == ownProcessId || layer != 0
+                        || sharingState <= 0 || isOnScreen == 0)
+                        continue;
+
+                    if (!TryGetDictionaryRect(dictionary, "kCGWindowBounds", out var bounds)
+                        || bounds.Size.Width < 160d || bounds.Size.Height < 100d)
+                        continue;
 
                     var owner = GetDictionaryString(dictionary, "kCGWindowOwnerName");
                     var title = GetDictionaryString(dictionary, "kCGWindowName");
@@ -886,7 +908,8 @@ namespace DomeProjection
             if (string.Equals(owner, "Dock", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(owner, "Window Server", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(owner, "SystemUIServer", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(owner, "Control Center", StringComparison.OrdinalIgnoreCase))
+                || string.Equals(owner, "Control Center", StringComparison.OrdinalIgnoreCase)
+                || owner.IndexOf("Dome Projection Output", StringComparison.OrdinalIgnoreCase) >= 0)
                 return true;
 
             // Finder's desktop can appear as a layer-zero pseudo window even
@@ -1000,7 +1023,20 @@ namespace DomeProjection
             finally { CFRelease(key); }
         }
 
-        private const uint WindowListOptionAll = 0;
+        private static bool TryGetDictionaryRect(IntPtr dictionary, string keyName, out CGRect rect)
+        {
+            rect = default;
+            var key = CFStringCreateWithCString(IntPtr.Zero, keyName, CfStringEncodingUtf8);
+            if (key == IntPtr.Zero) return false;
+            try
+            {
+                var value = CFDictionaryGetValue(dictionary, key);
+                return value != IntPtr.Zero && CGRectMakeWithDictionaryRepresentation(value, out rect);
+            }
+            finally { CFRelease(key); }
+        }
+
+        private const uint WindowListOptionOnScreenOnly = 1u << 0;
         private const uint WindowListIncludingWindow = 1u << 3;
         private const uint WindowListExcludeDesktopElements = 1u << 4;
         private const uint WindowImageBoundsIgnoreFraming = 1u << 0;
@@ -1021,6 +1057,8 @@ namespace DomeProjection
 
         [DllImport(CoreGraphics)] private static extern IntPtr CGWindowListCopyWindowInfo(uint option, uint relativeToWindow);
         [DllImport(CoreGraphics)] private static extern IntPtr CGWindowListCreateImage(CGRect screenBounds, uint listOption, uint windowId, uint imageOption);
+        [DllImport(CoreGraphics)] [return: MarshalAs(UnmanagedType.I1)]
+        private static extern bool CGRectMakeWithDictionaryRepresentation(IntPtr dictionary, out CGRect rect);
         [DllImport(CoreGraphics)] private static extern IntPtr CGImageGetWidth(IntPtr image);
         [DllImport(CoreGraphics)] private static extern IntPtr CGImageGetHeight(IntPtr image);
         [DllImport(CoreGraphics)] private static extern IntPtr CGImageGetBytesPerRow(IntPtr image);
