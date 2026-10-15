@@ -147,7 +147,7 @@ PlayerSettings:
   loadStoreDebugModeEnabled: 0
   visionOSBundleVersion: 1.0
   tvOSBundleVersion: 1.0
-  bundleVersion: 2026.10.15.20
+  bundleVersion: 2026.10.15.35
   preloadedAssets: []
   metroInputSource: 0
   wsaTransparentSwapchain: 0
@@ -172,7 +172,7 @@ PlayerSettings:
   applicationIdentifier:
     Standalone: com.DefaultCompany.dome-projection
   buildNumber:
-    Standalone: 20261015040431
+    Standalone: 20261015080802
     VisionOS: 0
     iPhone: 0
     tvOS: 0

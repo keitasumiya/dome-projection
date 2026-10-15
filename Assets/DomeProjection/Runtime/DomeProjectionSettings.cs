@@ -4,9 +4,83 @@ using UnityEngine;
 namespace DomeProjection
 {
     [Serializable]
+    public sealed class LensCalibrationProfile
+    {
+        public int profileVersion = 1;
+        public string displayName = string.Empty;
+        public string savedUtc = string.Empty;
+
+        // A lens/setup profile intentionally contains only the values fixed by
+        // the projector, conversion lens, and their physical alignment. Source
+        // orientation, media paths, brightness, and playback state stay intact.
+        public float domeFov = 180f;
+        public float centerX = 0.5f;
+        public float centerY = 0.5f;
+        public float radius = 0.485f;
+        public float ellipseX = 1f;
+        public float ellipseY = 1f;
+        public float outputRotation;
+        public float radialK1;
+        public float radialK2;
+        public float radialK3;
+        public float tangentialP1;
+        public float tangentialP2;
+        public float warpTop;
+        public float warpBottom;
+        public float warpLeft;
+        public float warpRight;
+
+        public static LensCalibrationProfile Capture(string name, DomeProjectionSettings settings)
+        {
+            return new LensCalibrationProfile
+            {
+                displayName = name,
+                savedUtc = DateTime.UtcNow.ToString("O"),
+                domeFov = settings.domeFov,
+                centerX = settings.centerX,
+                centerY = settings.centerY,
+                radius = settings.radius,
+                ellipseX = settings.ellipseX,
+                ellipseY = settings.ellipseY,
+                outputRotation = settings.outputRotation,
+                radialK1 = settings.radialK1,
+                radialK2 = settings.radialK2,
+                radialK3 = settings.radialK3,
+                tangentialP1 = settings.tangentialP1,
+                tangentialP2 = settings.tangentialP2,
+                warpTop = settings.warpTop,
+                warpBottom = settings.warpBottom,
+                warpLeft = settings.warpLeft,
+                warpRight = settings.warpRight
+            };
+        }
+
+        public void ApplyTo(DomeProjectionSettings settings)
+        {
+            settings.domeFov = domeFov;
+            settings.centerX = centerX;
+            settings.centerY = centerY;
+            settings.radius = radius;
+            settings.ellipseX = ellipseX;
+            settings.ellipseY = ellipseY;
+            settings.outputRotation = outputRotation;
+            settings.radialK1 = radialK1;
+            settings.radialK2 = radialK2;
+            settings.radialK3 = radialK3;
+            settings.tangentialP1 = tangentialP1;
+            settings.tangentialP2 = tangentialP2;
+            settings.warpTop = warpTop;
+            settings.warpBottom = warpBottom;
+            settings.warpLeft = warpLeft;
+            settings.warpRight = warpRight;
+            settings.Clamp();
+        }
+    }
+
+    [Serializable]
     public sealed class DomeProjectionSettings
     {
-        public int settingsVersion = 16;
+        public int settingsVersion = 17;
         public string videoPath = string.Empty;
 
         // Input source. 0 = video/image file, 1 = captured desktop window.
@@ -99,6 +173,9 @@ namespace DomeProjection
         public bool startMaximized = true;
         public int windowWidth = 1600;
         public int windowHeight = 900;
+        // Operator panel can be docked to either side so the projected-circle
+        // edge remains visible while calibrating it.
+        public bool controlPanelOnRight;
         // Keep the operator UI on display 0 and render a clean dome output on
         // display 1 (or another selected extended display).
         public bool useExtendedDisplayOutput;
@@ -295,7 +372,12 @@ namespace DomeProjection
                 allSkySourceRadialK1 = allSkySourceRadialK2 = 0f;
             }
 
-            settingsVersion = 16;
+            if (settingsVersion < 17)
+            {
+                controlPanelOnRight = false;
+            }
+
+            settingsVersion = 17;
         }
 
         public void Clamp()

@@ -61,6 +61,11 @@ namespace DomeProjection
                 if (player != null) player.AudioMuted = value;
             }
         }
+        public float AudioVolume
+        {
+            get => player != null ? player.AudioVolume : 1f;
+            set { if (player != null) player.AudioVolume = Mathf.Clamp01(value); }
+        }
         public bool IsLooping
         {
             get => !imagePrepared && player != null && player.Loop;

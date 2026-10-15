@@ -19,6 +19,7 @@ namespace DomeProjection
         bool IsSeeking { get; }
         bool RequiresVerticalFlip { get; }
         bool AudioMuted { get; set; }
+        float AudioVolume { get; set; }
         bool IsLooping { get; set; }
         double Time { get; set; }
         double Duration { get; }

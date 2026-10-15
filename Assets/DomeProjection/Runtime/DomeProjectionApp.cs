@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using UnityEngine;
@@ -16,19 +17,26 @@ namespace DomeProjection
 {
     public sealed class DomeProjectionApp : MonoBehaviour
     {
-        private const float PanelWidth = 440f;
+        private const float PanelWidth = 500f;
         private const float ReferenceUiHeight = 900f;
         private const float VideoPathWidth = 288f;
         // AVPro's native decoder accepts approximate preview seeks continuously;
         // match a typical display refresh rate while the pointer is dragged.
         private const float SeekPreviewInterval = 1f / 60f;
+        private const string MediaPathInputName = "text-input-media-path";
+        private const string LensProfileInputName = "text-input-lens-profile";
+        private const string MaterialNameInputName = "text-input-material-name";
+        private const string PlaylistNameInputName = "text-input-playlist-name";
+        private const string WindowWidthInputName = "text-input-window-width";
+        private const string WindowHeightInputName = "text-input-window-height";
         private readonly string[] gridModeNames = { "なし", "素材に重ねる", "校正パターン" };
-        private readonly string[] panelTabNames = { "配置", "校正", "レンズ", "出力／投影" };
+        private readonly string[] panelTabNames = { "配置", "校正", "レンズ", "出力", "素材一覧" };
         private readonly string[] sourceModeNames = { "動画・画像", "外部ウィンドウ" };
         private readonly int[] bridgeRates = { 30, 60, 120 };
 
         private DomeProjectionSettings settings;
         private IVideoSource video;
+        private IVideoSource preloadVideo;
         private IVideoSource idleImage;
         private IVideoSource windowBackgroundImage;
         private IWindowCaptureSource windowCapture;
@@ -40,14 +48,40 @@ namespace DomeProjection
         private string pathField = string.Empty;
         private string idleImagePathField = string.Empty;
         private string windowBackgroundImagePathField = string.Empty;
+        private string lensProfileName = string.Empty;
+        private string[] lensProfilePaths = Array.Empty<string>();
+        private string[] lensProfileNames = Array.Empty<string>();
+        private int selectedLensProfileIndex = -1;
+        private string pendingLensProfileDeletePath = string.Empty;
+        private string pendingLensProfileDeleteName = string.Empty;
+        private DomeConfigurationStore configurationStore;
+        private DomeMaterialCatalog materialCatalog = new DomeMaterialCatalog();
+        private DomePlaylistCatalog playlistCatalog = new DomePlaylistCatalog();
+        private string materialNameField = string.Empty;
+        private string playlistNameField = string.Empty;
+        private int selectedMaterialIndex = -1;
+        private int selectedPlaylistIndex = -1;
+        private int selectedPlaylistEntryIndex = -1;
+        private int activePlaylistIndex = -1;
+        private int activePlaylistEntryIndex = -1;
+        private bool activePlaylistCompleted;
+        private string pendingContentDeleteKind = string.Empty;
+        private string pendingContentDeleteId = string.Empty;
         private string windowWidthField = "1600";
         private string windowHeightField = "900";
         private bool showControls = true;
+        private bool textInputFocused;
         private GUIStyle titleStyle;
         private GUIStyle smallStyle;
+        private GUIStyle rowLabelStyle;
         private GUIStyle panelStyle;
+        private GUIStyle sectionStyle;
+        private GUIStyle sectionTitleStyle;
+        private GUIStyle chapterLabelStyle;
         private GUIStyle tabStyle;
         private GUIStyle activeTabStyle;
+        private GUIStyle selectedListButtonStyle;
+        private GUIStyle playingListButtonStyle;
         private GUIStyle tabContentStyle;
         private GUIStyle dropdownButtonStyle;
         private GUIStyle dropdownRowStyle;
@@ -56,16 +90,26 @@ namespace DomeProjection
         private GUIStyle sliderStyle;
         private GUIStyle sliderThumbStyle;
         private Texture2D panelTexture;
+        private Texture2D buttonTexture;
+        private Texture2D buttonHoverTexture;
+        private Texture2D buttonPressedTexture;
+        private Texture2D inputTexture;
+        private Texture2D inputFocusedTexture;
         private Texture2D tabTexture;
         private Texture2D activeTabTexture;
         private Texture2D tabContentTexture;
         private Texture2D dropdownRowTexture;
         private Texture2D dropdownSelectedRowTexture;
+        private Texture2D playingRowTexture;
         private Texture2D scrollbarTexture;
         private Texture2D scrollbarThumbTexture;
         private Texture2D sliderTexture;
         private Texture2D sliderThumbTexture;
         private Texture2D sliderThumbActiveTexture;
+        private Texture2D sectionTexture;
+        private Texture2D chapterPendingTexture;
+        private Texture2D chapterCompleteTexture;
+        private Texture2D chapterCurrentTexture;
         private int activeDisplay = -1;
         private int activePanelTab;
         private int selectedWindowIndex = -1;
@@ -85,12 +129,26 @@ namespace DomeProjection
         private bool mediaSelectedThisSession;
         private bool mediaShouldPlayWhenVisible;
         private bool mediaPreparingForDisplay;
+        private bool showLensCalibrationHelp;
+        private bool drawLargeTransportOverlay;
+        private float pendingPlaylistSeekFraction = -1f;
+        private string pendingPlaylistSeekMaterialId = string.Empty;
+        private bool pendingPlaylistSeekShouldPlay = true;
+        private bool playlistSeekDragging;
+        private int playlistSeekDraggingPlaylistIndex = -1;
+        private int playlistSeekPreviewEntryIndex = -1;
+        private float playlistSeekPreviewFraction;
+        private bool resumePlaylistAfterSeek;
+        private float nextPlaylistSeekPreviewTime;
+        private int lastPlaylistSeekPreviewEntryIndex = -1;
+        private float lastPlaylistSeekPreviewFraction = -1f;
         private Rect panelAreaRect;
         private FileStream instanceLock;
         private bool instanceFileRegionLocked;
         private bool projectorMode;
         private bool permissionSetupMode;
         private bool bridgeWantsMediaPlayback;
+        private bool bridgeWantsMediaLooping;
         private bool bridgeWasScrubbing;
         private float nextBridgeUpdate;
         private float nextHeartbeatUpdate;
@@ -100,14 +158,22 @@ namespace DomeProjection
         private long projectorStartedUtcTicks;
         private float outputLaunchPendingUntil;
         private string bridgedMediaPath = string.Empty;
+        private string bridgedPreloadMediaPath = string.Empty;
         private string bridgedIdleImagePath = string.Empty;
         private string bridgedWindowBackgroundImagePath = string.Empty;
         private long bridgedWindowId;
         private string bridgedWindowOwner = string.Empty;
         private string bridgedWindowTitle = string.Empty;
         private int nativeWindowStateGeneration;
+        private string preloadedPlaylistMaterialId = string.Empty;
+        private int playlistTransitionPhase;
+        private float playlistTransitionOpacity = 1f;
+        private float playlistFadeInStarted;
 
         private string SettingsPath => ProjectionProcessBridge.SettingsPath;
+        private string LegacyLensProfileDirectory => Path.Combine(
+            Path.GetDirectoryName(SettingsPath) ?? Application.persistentDataPath, "LensProfiles");
+        private string LensProfileDirectory => configurationStore?.LensDirectoryPath ?? LegacyLensProfileDirectory;
 
 #if DOME_PROJECTION_OUTPUT
         private const bool IsOutputBuild = true;
@@ -126,6 +192,11 @@ namespace DomeProjection
 
             Application.runInBackground = true;
             LoadSettings();
+            if (!projectorMode)
+            {
+                InitializeConfigurationStore();
+                ReloadContentConfiguration(false);
+            }
             // Network synchronization frequency must not cap UI/video rendering.
             // Both windows render at the display refresh rate independently.
             QualitySettings.vSyncCount = 1;
@@ -288,6 +359,7 @@ namespace DomeProjection
             if (sliderTexture != null) Destroy(sliderTexture);
             if (sliderThumbTexture != null) Destroy(sliderThumbTexture);
             if (sliderThumbActiveTexture != null) Destroy(sliderThumbActiveTexture);
+            if (playingRowTexture != null) Destroy(playingRowTexture);
             if (instanceFileRegionLocked && instanceLock != null)
             {
                 try { instanceLock.Unlock(0, 1); }
@@ -332,11 +404,17 @@ namespace DomeProjection
             var sourceObject = new GameObject("AVPro Video Source");
             sourceObject.transform.SetParent(transform, false);
             var source = sourceObject.AddComponent<AVProVideoSource>();
-            source.Prepared += OnMediaPrepared;
-            source.Failed += OnMediaFailed;
-            source.Ended += OnMediaEnded;
             video = source;
+            BindPrimaryVideoEvents(video);
             video.AudioMuted = settings.audioMuted;
+
+            var preloadObject = new GameObject("AVPro Playlist Preload Source");
+            preloadObject.transform.SetParent(transform, false);
+            var preloadSource = preloadObject.AddComponent<AVProVideoSource>();
+            preloadVideo = preloadSource;
+            BindPreloadVideoEvents(preloadVideo);
+            preloadVideo.AudioMuted = true;
+            preloadVideo.IsLooping = false;
 
             var idleObject = new GameObject("Idle Image Source");
             idleObject.transform.SetParent(transform, false);
@@ -351,6 +429,49 @@ namespace DomeProjection
             windowBackgroundSource.Prepared += OnWindowBackgroundImagePrepared;
             windowBackgroundSource.Failed += OnWindowBackgroundImageFailed;
             windowBackgroundImage = windowBackgroundSource;
+        }
+
+        private void BindPrimaryVideoEvents(IVideoSource source)
+        {
+            if (source == null) return;
+            source.Prepared += OnMediaPrepared;
+            source.Failed += OnMediaFailed;
+            source.Ended += OnMediaEnded;
+        }
+
+        private void UnbindPrimaryVideoEvents(IVideoSource source)
+        {
+            if (source == null) return;
+            source.Prepared -= OnMediaPrepared;
+            source.Failed -= OnMediaFailed;
+            source.Ended -= OnMediaEnded;
+        }
+
+        private void BindPreloadVideoEvents(IVideoSource source)
+        {
+            if (source == null) return;
+            source.Prepared += OnPreloadMediaPrepared;
+            source.Failed += OnPreloadMediaFailed;
+        }
+
+        private void UnbindPreloadVideoEvents(IVideoSource source)
+        {
+            if (source == null) return;
+            source.Prepared -= OnPreloadMediaPrepared;
+            source.Failed -= OnPreloadMediaFailed;
+        }
+
+        private void SwapVideoSourceRoles()
+        {
+            UnbindPrimaryVideoEvents(video);
+            UnbindPreloadVideoEvents(preloadVideo);
+            (video, preloadVideo) = (preloadVideo, video);
+            BindPrimaryVideoEvents(video);
+            BindPreloadVideoEvents(preloadVideo);
+            outputRenderer.VideoSource = video;
+            previewRenderer.VideoSource = video;
+            preloadVideo.AudioMuted = true;
+            preloadVideo.IsLooping = false;
         }
 
         private void CreateWindowCaptureSource()
@@ -418,7 +539,12 @@ namespace DomeProjection
                 settings.showIdleScreen = false;
             mediaPreparingForDisplay = false;
             settings.videoPath = video.SourcePath;
-            if (!video.IsStillImage) video.IsLooping = settings.loop;
+            // A playlist item must reach Ended so Control can advance it. The
+            // playlist's own loop flag handles wrapping from the last item.
+            if (!video.IsStillImage)
+                video.IsLooping = projectorMode
+                    ? bridgeWantsMediaLooping
+                    : activePlaylistIndex < 0 && settings.loop;
             status = $"{(video.IsStillImage ? "画像" : "動画")}読込完了: {video.Width} × {video.Height}";
 
             if (video.Height > 0)
@@ -429,6 +555,7 @@ namespace DomeProjection
             }
 
             if (settings.gridMode == 2) settings.gridMode = 0;
+            if (!projectorMode) ApplyPendingPlaylistSeek();
             if (!video.IsStillImage)
             {
                 if (projectorMode)
@@ -443,7 +570,63 @@ namespace DomeProjection
                     ApplyControlMediaPlaybackState();
                 }
             }
+            if (!projectorMode) UpdateMaterialDurationForCurrentPath();
             SaveSettings();
+        }
+
+        private void OnPreloadMediaPrepared()
+        {
+            preloadVideo.IsLooping = false;
+            preloadVideo.AudioMuted = true;
+            preloadVideo.AudioVolume = 0f;
+            preloadVideo.Pause();
+        }
+
+        private void OnPreloadMediaFailed(string message)
+        {
+            preloadedPlaylistMaterialId = string.Empty;
+            UnityEngine.Debug.LogWarning("Playlist preload failed: " + message);
+        }
+
+        private void ApplyPendingPlaylistSeek()
+        {
+            if (pendingPlaylistSeekFraction < 0f || activePlaylistIndex < 0
+                || activePlaylistIndex >= playlistCatalog.playlists.Count) return;
+            var playlist = playlistCatalog.playlists[activePlaylistIndex];
+            if (activePlaylistEntryIndex < 0 || activePlaylistEntryIndex >= playlist.materialIds.Count) return;
+            var materialId = playlist.materialIds[activePlaylistEntryIndex];
+            if (!string.Equals(materialId, pendingPlaylistSeekMaterialId, StringComparison.Ordinal)) return;
+
+            var fraction = Mathf.Clamp01(pendingPlaylistSeekFraction);
+            pendingPlaylistSeekFraction = -1f;
+            pendingPlaylistSeekMaterialId = string.Empty;
+            if (video.IsStillImage || video.Duration <= 0d) return;
+            if (playlistSeekDragging)
+            {
+                mediaShouldPlayWhenVisible = false;
+                video.SeekPreview(video.Duration * fraction);
+            }
+            else
+            {
+                mediaShouldPlayWhenVisible = pendingPlaylistSeekShouldPlay;
+                video.Seek(video.Duration * fraction, pendingPlaylistSeekShouldPlay);
+            }
+        }
+
+        private void UpdateMaterialDurationForCurrentPath()
+        {
+            if (video == null || !video.IsPrepared || video.IsStillImage || video.Duration <= 0d
+                || configurationStore == null) return;
+            foreach (var item in materialCatalog.materials)
+            {
+                var resolvedPath = configurationStore.ResolveMediaPath(item.path);
+                if (!MediaPathsEqual(resolvedPath, video.SourcePath)) continue;
+                var duration = (float)video.Duration;
+                if (Mathf.Abs(item.durationSeconds - duration) < 0.25f) return;
+                item.durationSeconds = duration;
+                SaveMaterialCatalog();
+                return;
+            }
         }
 
         private void OnMediaFailed(string message)
@@ -453,9 +636,31 @@ namespace DomeProjection
 
         private void OnMediaEnded()
         {
+            // Some native backends can report FinishedPlaying while pausing at
+            // the final frame. A user pause must never destroy playlist state.
+            if (projectorMode || !mediaShouldPlayWhenVisible) return;
+            var playlistAdvanceAttempted = false;
+            if (playlistTransitionPhase == 1)
+            {
+                playlistTransitionOpacity = 0f;
+                playlistAdvanceAttempted = true;
+                if (AdvanceActivePlaylist(1))
+                {
+                    playlistTransitionPhase = 2;
+                    playlistFadeInStarted = Time.unscaledTime;
+                    return;
+                }
+                ResetPlaylistTransition();
+            }
+            if (!playlistAdvanceAttempted && !projectorMode && activePlaylistIndex >= 0
+                && activePlaylistIndex < playlistCatalog.playlists.Count
+                && playlistCatalog.playlists[activePlaylistIndex].autoAdvance
+                && AdvanceActivePlaylist(1)) return;
             mediaShouldPlayWhenVisible = false;
             SetIdleScreenVisible(true);
-            status = "動画が終了したため待機画面へ切り替えました";
+            status = activePlaylistCompleted
+                ? "プレイリストの再生が完了しました。中央の再生ボタンで先頭から再生できます"
+                : "動画が終了したため待機画面へ切り替えました";
             SaveSettings();
         }
 
@@ -501,10 +706,12 @@ namespace DomeProjection
             status = "ウィンドウ取込エラー: " + message;
         }
 
-        private void OpenMedia()
+        private void OpenMedia(bool preserveMaterialName = false)
         {
-            var path = pathField.Trim();
+            var path = pathField.Trim().Trim('"');
             if (string.IsNullOrWhiteSpace(path)) return;
+            if (!preserveMaterialName && !MediaPathsEqual(path, video?.SourcePath))
+                materialNameField = Path.GetFileNameWithoutExtension(path);
             mediaSeekDragging = false;
             resumeMediaAfterSeek = false;
             lastSeekPreviewTarget = -1d;
@@ -519,6 +726,22 @@ namespace DomeProjection
             settings.videoPath = path;
             status = "素材を準備中…";
             video.Open(path);
+        }
+
+        private static bool MediaPathsEqual(string first, string second)
+        {
+            if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(second)) return false;
+            if (first.Contains("://") || second.Contains("://"))
+                return string.Equals(first, second, StringComparison.Ordinal);
+            try
+            {
+                return string.Equals(Path.GetFullPath(first), Path.GetFullPath(second),
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return string.Equals(first, second, StringComparison.OrdinalIgnoreCase);
+            }
         }
 
         private void OpenIdleImage(string path, bool switchToIdleImage)
@@ -765,6 +988,8 @@ namespace DomeProjection
             }
             else
             {
+                ResetPlaylistTransition();
+                ClearPlaylistPreload();
                 if (video.IsPlaying) video.Pause();
                 if (windowCapture.Windows.Count == 0) RefreshWindowList();
                 if (!RestoreCapturedWindow())
@@ -1036,10 +1261,25 @@ namespace DomeProjection
 
         private void Update()
         {
-            video.IsLooping = settings.loop;
+            // Playlist videos must be allowed to finish so OnMediaEnded can
+            // advance to the next entry. Do not overwrite this every frame with
+            // the individual material's loop preference.
+            if (!projectorMode) video.IsLooping = activePlaylistIndex < 0 && settings.loop;
+            preloadVideo.IsLooping = false;
+            preloadVideo.AudioMuted = true;
             windowCapture.CaptureFps = settings.windowCaptureFps;
-            if (projectorMode) UpdateProjectorProcess();
-            else UpdateControlProcess();
+            if (projectorMode)
+            {
+                UpdateProjectorProcess();
+            }
+            else
+            {
+                UpdatePlaylistTransition();
+                UpdateControlProcess();
+            }
+            outputRenderer.ContentOpacity = playlistTransitionOpacity;
+            previewRenderer.ContentOpacity = playlistTransitionOpacity;
+            video.AudioVolume = playlistTransitionOpacity;
             if (focusCapturedWindowNextFrame)
             {
                 focusCapturedWindowNextFrame = false;
@@ -1067,9 +1307,14 @@ namespace DomeProjection
                 // isPlaying is temporarily false during every seek, which used
                 // to make Output pause and resume a second time.
                 mediaIsPlaying = settings.sourceMode == 0 && !settings.showIdleScreen
-                    && mediaShouldPlayWhenVisible && !mediaSeekDragging,
-                mediaIsScrubbing = mediaSeekDragging,
-                mediaTime = mediaSeekDragging ? mediaSeekPreviewTime : video != null ? video.Time : 0d
+                    && mediaShouldPlayWhenVisible && !mediaSeekDragging && !playlistSeekDragging,
+                mediaIsLooping = activePlaylistIndex < 0 && settings.loop,
+                mediaIsScrubbing = mediaSeekDragging || playlistSeekDragging,
+                mediaTime = mediaSeekDragging
+                    ? mediaSeekPreviewTime
+                    : PlaylistSeekPreviewTime(),
+                preloadMediaPath = preloadVideo?.SourcePath ?? string.Empty,
+                transitionOpacity = playlistTransitionOpacity
             });
         }
 
@@ -1094,7 +1339,11 @@ namespace DomeProjection
 
             lastAppliedBridgeSequence = shared.sequence;
             bridgeWantsMediaPlayback = shared.mediaIsPlaying;
+            bridgeWantsMediaLooping = shared.mediaIsLooping;
             ApplySharedSettings(shared.settings);
+            video.IsLooping = shared.mediaIsLooping;
+            playlistTransitionOpacity = Mathf.Clamp01(shared.transitionOpacity);
+            var requestedPreloadPath = shared.preloadMediaPath ?? string.Empty;
 
             // Output captures the selected window independently from Control.
             // Changing sourceMode previously hid that texture but left
@@ -1140,7 +1389,30 @@ namespace DomeProjection
                     && settings.videoPath != bridgedMediaPath)
                 {
                     bridgedMediaPath = settings.videoPath;
-                    video.Open(bridgedMediaPath);
+                    if (preloadVideo.IsPrepared && MediaPathsEqual(bridgedMediaPath, preloadVideo.SourcePath))
+                    {
+                        SwapVideoSourceRoles();
+                        // The former primary decoder is now the preload slot.
+                        // Release it immediately so a long previous movie does
+                        // not keep decoding invisibly until the next preload.
+                        preloadVideo.Clear();
+                        video.AudioMuted = settings.audioMuted;
+                        video.IsLooping = shared.mediaIsLooping;
+                        bridgedPreloadMediaPath = string.Empty;
+                    }
+                    else
+                        video.Open(bridgedMediaPath);
+                }
+
+                var preloadChanged = string.IsNullOrWhiteSpace(requestedPreloadPath)
+                    ? !string.IsNullOrWhiteSpace(bridgedPreloadMediaPath)
+                    : !MediaPathsEqual(requestedPreloadPath, bridgedPreloadMediaPath);
+                if (preloadChanged)
+                {
+                    bridgedPreloadMediaPath = requestedPreloadPath;
+                    if (string.IsNullOrWhiteSpace(bridgedPreloadMediaPath)) preloadVideo.Clear();
+                    else if (!MediaPathsEqual(bridgedPreloadMediaPath, video.SourcePath))
+                        preloadVideo.Open(bridgedPreloadMediaPath);
                 }
 
                 if (video.IsPrepared && !video.IsStillImage)
@@ -1195,7 +1467,6 @@ namespace DomeProjection
             outputRenderer.Settings = settings;
             previewRenderer.Settings = settings;
             windowCapture.CaptureFps = settings.windowCaptureFps;
-            video.IsLooping = settings.loop;
             video.AudioMuted = settings.audioMuted;
         }
 
@@ -1296,9 +1567,6 @@ namespace DomeProjection
         private void OnGUI()
         {
             if (projectorMode) return;
-            HandleHotkeys(Event.current);
-            if (!showControls) return;
-
             BuildStyles();
             var previousMatrix = GUI.matrix;
             // Keep controls physically readable when the operator enlarges or
@@ -1306,62 +1574,215 @@ namespace DomeProjection
             // the complete UI up to 160% instead of leaving tiny text behind.
             var uiScale = Mathf.Clamp(Screen.height / ReferenceUiHeight, 0.75f, 1.6f);
             GUI.matrix = Matrix4x4.Scale(new Vector3(uiScale, uiScale, 1f));
+            var logicalWidth = Screen.width / uiScale;
             var logicalHeight = Screen.height / uiScale;
             var margin = 16f / uiScale;
-            panelAreaRect = new Rect(margin, margin, PanelWidth, logicalHeight - margin * 2f);
+            drawLargeTransportOverlay = showControls && settings.sourceMode == 0
+                && logicalWidth >= PanelWidth * 2f + 560f
+                && ((video != null && video.IsPrepared && !video.IsStillImage)
+                    || activePlaylistIndex >= 0);
+            var panelX = settings.controlPanelOnRight
+                ? logicalWidth - PanelWidth - margin
+                : margin;
+            panelAreaRect = new Rect(panelX, margin, PanelWidth, logicalHeight - margin * 2f);
             HandleWindowDropdownInput();
-            GUILayout.BeginArea(panelAreaRect, panelStyle);
-            GUILayout.Label("Dome Projection Control", titleStyle);
-            GUILayout.Label("Version " + Application.version, smallStyle);
-            GUILayout.Label(status, smallStyle);
-            DrawOutputModeBanner();
-            GUILayout.Space(8f);
+            HandlePanelScrollWheel();
 
-            DrawSourceControls();
-            GUILayout.Space(8f);
-            DrawPanelTabs();
-            panelScrollPosition = GUILayout.BeginScrollView(panelScrollPosition, false, false,
-                GUIStyle.none, GUI.skin.verticalScrollbar, GUILayout.ExpandHeight(true));
-            GUILayout.BeginVertical(tabContentStyle, GUILayout.ExpandHeight(true));
-            switch (activePanelTab)
+            if (showControls)
             {
-                case 0: DrawBasicPanel(); break;
-                case 1: DrawCalibrationPanel(); break;
-                case 2: DrawLensPanel(); break;
-                default: DrawOutputPanel(); break;
-            }
-            GUILayout.EndVertical();
-            GUILayout.EndScrollView();
+                GUILayout.BeginArea(panelAreaRect, panelStyle);
+                panelScrollPosition = GUILayout.BeginScrollView(panelScrollPosition, false, false,
+                    GUIStyle.none, GUI.skin.verticalScrollbar, GUILayout.ExpandHeight(true));
+                // Reserve explicit room for the scrollbar. Unity's IMGUI scroll
+                // view can otherwise draw it over the right edge of its content.
+                // Account for panel padding, the scrollbar and IMGUI's scroll
+                // view gutter. This produces matching 12 px visual margins on
+                // the left and immediately before the scrollbar on the right.
+                const float panelContentReservedWidth = 50f;
+                GUILayout.BeginVertical(GUILayout.Width(PanelWidth - panelContentReservedWidth));
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Dome Projection Control", titleStyle, GUILayout.ExpandWidth(true));
+                if (GUILayout.Button(settings.controlPanelOnRight ? "◀ 左へ" : "右へ ▶",
+                        GUILayout.Width(72f), GUILayout.Height(28f)))
+                {
+                    settings.controlPanelOnRight = !settings.controlPanelOnRight;
+                    showWindowDropdown = false;
+                    SaveSettings();
+                }
+                GUILayout.EndHorizontal();
+                GUILayout.Label("Version " + Application.version, smallStyle);
+                GUILayout.Label(status, smallStyle);
+                DrawOutputModeBanner();
+                GUILayout.Space(8f);
 
-            GUILayout.Space(4f);
-            if (GUILayout.Button("設定UIを隠す（Hで再表示）")) showControls = false;
-            GUILayout.Space(4f);
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("設定を保存")) { SaveSettings(); status = "設定を保存しました"; }
-            if (GUILayout.Button("設定を再読込"))
-            {
-                LoadSettings();
-                if (!string.IsNullOrWhiteSpace(settings.idleImagePath))
-                    OpenIdleImage(settings.idleImagePath, false);
-                else
-                    idleImage.Clear();
-                if (!string.IsNullOrWhiteSpace(settings.windowBackgroundImagePath))
-                    OpenWindowBackgroundImage(settings.windowBackgroundImagePath);
-                else
-                    windowBackgroundImage.Clear();
-                status = "設定を再読込しました";
+                DrawSourceControls();
+                GUILayout.Space(8f);
+                DrawPanelTabs();
+                GUILayout.BeginVertical(tabContentStyle);
+                switch (activePanelTab)
+                {
+                    case 0: DrawBasicPanel(); break;
+                    case 1: DrawCalibrationPanel(); break;
+                    case 2: DrawLensPanel(); break;
+                    case 3: DrawOutputPanel(); break;
+                    default: DrawContentLibraryPanel(); break;
+                }
+                GUILayout.EndVertical();
+
+                GUILayout.Space(8f);
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("設定を保存")) { SaveSettings(); status = "設定を保存しました"; }
+                if (GUILayout.Button("設定を再読込"))
+                {
+                    LoadSettings();
+                    if (!string.IsNullOrWhiteSpace(settings.idleImagePath))
+                        OpenIdleImage(settings.idleImagePath, false);
+                    else
+                        idleImage.Clear();
+                    if (!string.IsNullOrWhiteSpace(settings.windowBackgroundImagePath))
+                        OpenWindowBackgroundImage(settings.windowBackgroundImagePath);
+                    else
+                        windowBackgroundImage.Clear();
+                    status = "設定を再読込しました";
+                }
+                GUILayout.EndHorizontal();
+
+                GUILayout.Space(8f);
+                GUILayout.Label("アプリ操作", sectionTitleStyle);
+                if (GUILayout.Button("Dome Projection Controlを終了", GUILayout.Height(30f)))
+                    QuitApplication();
+
+                GUILayout.Space(6f);
+                GUILayout.Label(settings.sourceMode == 1
+                    ? "←/→・PgUp/PgDn: スライド移動   T: 操作先へ切替   B: 待機画面   G: ガイド   H: UI   F: 全画面   Esc: 全画面解除"
+                    : "1/2/3/4/5: タブ   F5/F6: 素材/画面取込   Ctrl+O: 素材選択   Space: 再生/停止   B: 待機画面   G: ガイド   H: UI", smallStyle);
+                GUILayout.Label($"出力 {Screen.width}×{Screen.height} / Display {settings.outputDisplay}", smallStyle);
+                GUILayout.EndVertical();
+                GUILayout.EndScrollView();
+                GUILayout.EndArea();
             }
-            if (GUILayout.Button("アプリを終了", GUILayout.Width(90f))) QuitApplication();
+
+            DrawPanelVisibilityToggle(logicalWidth, margin);
+            if (drawLargeTransportOverlay) DrawTransportOverlay(logicalWidth, logicalHeight, margin);
+            if (showWindowDropdown && settings.sourceMode == 1) DrawWindowDropdown();
+            // Cache after controls have registered their IMGUI names so plain
+            // character shortcuts never consume text typed into a field.
+            textInputFocused = showControls && IsTextInputFocused();
+            HandleHotkeys(Event.current);
+            GUI.matrix = previousMatrix;
+        }
+
+        private void DrawTransportOverlay(float logicalWidth, float logicalHeight, float margin)
+        {
+            // Keep playback controls at the actual horizontal center of the
+            // application window. Their position must not jump when the setup
+            // panel is moved between the left and right sides.
+            var availableWidth = logicalWidth - margin * 2f;
+            if (availableWidth < 500f) return;
+
+            var hasActivePlaylist = activePlaylistIndex >= 0
+                                    && activePlaylistIndex < playlistCatalog.playlists.Count;
+            var width = Mathf.Min(760f, availableWidth - 32f);
+            var height = hasActivePlaylist ? 150f : 96f;
+            var area = new Rect((logicalWidth - width) * 0.5f,
+                logicalHeight - height - margin, width, height);
+            GUILayout.BeginArea(area, sectionStyle);
+
+            GUILayout.BeginHorizontal(GUILayout.Height(28f));
+            if (hasActivePlaylist)
+            {
+                var playlist = playlistCatalog.playlists[activePlaylistIndex];
+                GUILayout.Label("プレイリスト: " + playlist.name, sectionTitleStyle,
+                    GUILayout.ExpandWidth(true));
+                var autoAdvance = GUILayout.Toggle(playlist.autoAdvance,
+                    new GUIContent(playlist.autoAdvance ? "自動切替 ON" : "自動切替 OFF",
+                        "動画終了時に次の素材へ自動切替"),
+                    GUILayout.Width(108f));
+                if (autoAdvance != playlist.autoAdvance)
+                {
+                    playlist.autoAdvance = autoAdvance;
+                    ResetPlaylistTransition();
+                    if (!autoAdvance) ClearPlaylistPreload();
+                    SavePlaylistCatalog();
+                }
+                if (GUILayout.Button(new GUIContent("|◀ 前へ", "前の素材"), GUILayout.Width(82f)))
+                    AdvanceActivePlaylist(-1);
+                var effectivelyPlaying = mediaShouldPlayWhenVisible && !settings.showIdleScreen
+                                         && !activePlaylistCompleted;
+                if (GUILayout.Button(effectivelyPlaying ? "Ⅱ 一時停止" : "▶ 再生",
+                        GUILayout.Width(92f)))
+                    ToggleActivePlaylistPlayback();
+                if (GUILayout.Button(new GUIContent("次へ ▶|", "次の素材"), GUILayout.Width(82f)))
+                    AdvanceActivePlaylist(1);
+                var loopStyle = playlist.loop ? activeTabStyle : tabStyle;
+                if (GUILayout.Button(new GUIContent("↻", "末尾から先頭へループ"), loopStyle,
+                        GUILayout.Width(40f), GUILayout.Height(28f)))
+                {
+                    playlist.loop = !playlist.loop;
+                    SavePlaylistCatalog();
+                }
+            }
+            else
+            {
+                var name = video == null || string.IsNullOrWhiteSpace(video.SourcePath)
+                    ? "動画"
+                    : Path.GetFileNameWithoutExtension(video.SourcePath);
+                GUILayout.Label(TruncateLabel(name, 54), sectionTitleStyle, GUILayout.ExpandWidth(true));
+                if (GUILayout.Button(mediaShouldPlayWhenVisible ? "一時停止" : "再生", GUILayout.Width(82f)))
+                {
+                    mediaShouldPlayWhenVisible = !mediaShouldPlayWhenVisible;
+                    ApplyControlMediaPlaybackState();
+                }
+            }
             GUILayout.EndHorizontal();
 
-            GUILayout.Space(4f);
-            GUILayout.Label(settings.sourceMode == 1
-                ? "←/→・PgUp/PgDn: スライド移動   T: 操作先へ切替   B: 待機画面   G: ガイド   H: UI   F: 全画面   Esc: 全画面解除"
-                : "1/2/3/4: タブ   F5/F6: 素材/画面取込   Ctrl+O: 素材選択   Space: 再生/停止   B: 待機画面   G: ガイド   H: UI", smallStyle);
-            GUILayout.Label($"出力 {Screen.width}×{Screen.height} / Display {settings.outputDisplay}", smallStyle);
+            if (hasActivePlaylist)
+                DrawPlaylistSeekBar(playlistCatalog.playlists[activePlaylistIndex], activePlaylistIndex, true);
+            else if (video != null && video.IsPrepared && !video.IsStillImage && video.Duration > 0d)
+                DrawMediaSeekBar();
             GUILayout.EndArea();
-            if (showWindowDropdown && settings.sourceMode == 1) DrawWindowDropdown();
-            GUI.matrix = previousMatrix;
+        }
+
+        private void DrawPanelVisibilityToggle(float logicalWidth, float margin)
+        {
+            const float width = 148f;
+            const float height = 34f;
+            float x;
+            string label;
+            if (showControls)
+            {
+                x = settings.controlPanelOnRight
+                    ? panelAreaRect.x - width - 5f
+                    : panelAreaRect.xMax + 5f;
+                label = settings.controlPanelOnRight
+                    ? "設定パネルを隠す ▶"
+                    : "◀ 設定パネルを隠す";
+            }
+            else
+            {
+                x = settings.controlPanelOnRight
+                    ? logicalWidth - margin - width
+                    : margin;
+                label = "☰ 設定パネルを表示";
+            }
+
+            if (!GUI.Button(new Rect(x, margin, width, height), label)) return;
+            showControls = !showControls;
+            if (!showControls) showWindowDropdown = false;
+        }
+
+        private void HandlePanelScrollWheel()
+        {
+            if (!showControls || Event.current.type != EventType.ScrollWheel) return;
+            panelScrollPosition.y = Mathf.Max(0f,
+                panelScrollPosition.y + Event.current.delta.y * 30f);
+            Event.current.Use();
+        }
+
+        private static Vector2 GetLogicalMousePosition()
+        {
+            var point = GUI.matrix.inverse.MultiplyPoint3x4(Event.current.mousePosition);
+            return new Vector2(point.x, point.y);
         }
 
         private void DrawOutputModeBanner()
@@ -1396,16 +1817,7 @@ namespace DomeProjection
 
         private void DrawSourceControls()
         {
-            GUILayout.Label("入力ソース");
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button(settings.showIdleScreen ? "素材表示へ戻す" : "待機画面を表示"))
-                SetIdleScreenVisible(!settings.showIdleScreen);
-            var guideVisible = settings.gridMode == 1;
-            if (GUILayout.Button(guideVisible ? "●  半球ガイド表示中" : "○  半球ガイドを表示",
-                    guideVisible ? activeTabStyle : tabStyle))
-                ToggleDomeGuide();
-            GUILayout.EndHorizontal();
-            GUILayout.Space(4f);
+            BeginSection("入力ソースを選択");
             GUILayout.BeginHorizontal();
             for (var index = 0; index < sourceModeNames.Length; index++)
             {
@@ -1413,7 +1825,17 @@ namespace DomeProjection
                     SetSourceMode(index);
             }
             GUILayout.EndHorizontal();
-            GUILayout.Space(4f);
+            EndSection();
+
+            BeginSection("表示オプション");
+            if (GUILayout.Button(settings.showIdleScreen ? "待機画面：表示中" : "待機画面：非表示",
+                    settings.showIdleScreen ? activeTabStyle : tabStyle, GUILayout.Height(30f)))
+                SetIdleScreenVisible(!settings.showIdleScreen);
+            var guideVisible = settings.gridMode == 1;
+            if (GUILayout.Button(guideVisible ? "半球ガイド：表示中" : "半球ガイド：非表示",
+                    guideVisible ? activeTabStyle : tabStyle, GUILayout.Height(30f)))
+                ToggleDomeGuide();
+            EndSection();
 
             if (settings.sourceMode == 1) DrawWindowCaptureControls();
             else DrawMediaControls();
@@ -1421,8 +1843,9 @@ namespace DomeProjection
 
         private void DrawMediaControls()
         {
-            GUILayout.Label("動画・画像");
+            BeginSection("動画・画像");
             GUILayout.BeginHorizontal();
+            GUI.SetNextControlName(MediaPathInputName);
             pathField = GUILayout.TextField(pathField, GUILayout.Width(VideoPathWidth));
             if (GUILayout.Button("選択", GUILayout.Width(54f))) BrowseMedia();
             if (GUILayout.Button("読込", GUILayout.Width(54f))) OpenMedia();
@@ -1462,14 +1885,15 @@ namespace DomeProjection
                 GUILayout.EndHorizontal();
             }
 
-            if (video.IsPrepared && video.Duration > 0d)
+            if (video.IsPrepared && video.Duration > 0d && !drawLargeTransportOverlay)
                 DrawMediaSeekBar();
+            EndSection();
         }
 
         private void DrawFileProjectionModeButton(int mode, string label)
         {
             var selected = settings.fileProjectionMode == mode;
-            if (!GUILayout.Button((selected ? "●  " : "○  ") + label,
+            if (!GUILayout.Button(label,
                     selected ? activeTabStyle : tabStyle, GUILayout.ExpandWidth(true))) return;
             settings.fileProjectionMode = mode;
             settings.fileIsFlat = mode == 1;
@@ -1517,9 +1941,9 @@ namespace DomeProjection
             var rawEventType = Event.current.rawType;
             var mousePosition = Event.current.mousePosition;
 
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("再生位置", GUILayout.Width(82f));
-            var sliderRect = GUILayoutUtility.GetRect(40f, 18f, GUILayout.ExpandWidth(true));
+            GUILayout.BeginHorizontal(GUILayout.Height(28f));
+            GUILayout.Label("再生位置", rowLabelStyle, GUILayout.Width(82f));
+            var sliderRect = ReserveCenteredSliderRect();
             if (!mediaSeekDragging && rawEventType == EventType.MouseDown
                 && Event.current.button == 0 && sliderRect.Contains(mousePosition))
             {
@@ -1531,8 +1955,8 @@ namespace DomeProjection
                 video.Pause();
             }
 
-            displayedTime = GUI.HorizontalSlider(sliderRect, (float)displayedTime, 0f,
-                (float)video.Duration, sliderStyle, sliderThumbStyle);
+            displayedTime = DrawCenteredSlider(sliderRect, (float)displayedTime, 0f,
+                (float)video.Duration);
             if (mediaSeekDragging)
             {
                 mediaSeekPreviewTime = displayedTime;
@@ -1546,7 +1970,7 @@ namespace DomeProjection
                     video.SeekPreview(mediaSeekPreviewTime);
                 }
             }
-            GUILayout.Label(FormatTime(displayedTime) + " / " + FormatTime(video.Duration),
+            GUILayout.Label(FormatTime(displayedTime) + " / " + FormatTime(video.Duration), rowLabelStyle,
                 GUILayout.Width(92f));
             GUILayout.EndHorizontal();
 
@@ -1598,7 +2022,10 @@ namespace DomeProjection
                 : TruncateLabel(selected.DisplayName, 44) + " ▼";
             var dropdownClicked = GUILayout.Button(dropdownLabel, dropdownButtonStyle, GUILayout.Height(28f));
             if (Event.current.type == EventType.Repaint)
+            {
                 windowDropdownAnchor = GUILayoutUtility.GetLastRect();
+                windowDropdownAnchor.y -= panelScrollPosition.y;
+            }
             if (dropdownClicked)
             {
                 showWindowDropdown = !showWindowDropdown;
@@ -1682,7 +2109,7 @@ namespace DomeProjection
                 Mathf.Min(windowDropdownAnchor.width, PanelWidth - 24f), height);
             var maxScroll = Mathf.Max(0f, contentHeight - visibleHeight);
             windowDropdownScroll = Mathf.Clamp(windowDropdownScroll, 0f, maxScroll);
-            var mouseInDropdown = Event.current.mousePosition - dropdownRect.position;
+            var mouseInDropdown = GetLogicalMousePosition() - dropdownRect.position;
             var hoveredIndex = -1;
             if (count > 0 && mouseInDropdown.x >= 8f && mouseInDropdown.x < dropdownRect.width - 18f
                 && mouseInDropdown.y >= 8f && mouseInDropdown.y < 8f + visibleHeight)
@@ -1762,8 +2189,9 @@ namespace DomeProjection
             var dropdownRect = new Rect(panelAreaRect.x + windowDropdownAnchor.x,
                 panelAreaRect.y + windowDropdownAnchor.yMax + 2f,
                 Mathf.Min(windowDropdownAnchor.width, PanelWidth - 24f), visibleHeight + 16f);
+            var mousePosition = GetLogicalMousePosition();
 
-            if (rawEventType == EventType.ScrollWheel && dropdownRect.Contains(Event.current.mousePosition))
+            if (rawEventType == EventType.ScrollWheel && dropdownRect.Contains(mousePosition))
             {
                 var maxScroll = Mathf.Max(0f, contentHeight - visibleHeight);
                 windowDropdownScroll = Mathf.Clamp(windowDropdownScroll + Event.current.delta.y * rowHeight,
@@ -1773,10 +2201,10 @@ namespace DomeProjection
             }
             if (rawEventType != EventType.MouseDown || Event.current.button != 0) return;
 
-            if (dropdownRect.Contains(Event.current.mousePosition) && count > 0
-                && Event.current.mousePosition.x < dropdownRect.xMax - 16f)
+            if (dropdownRect.Contains(mousePosition) && count > 0
+                && mousePosition.x < dropdownRect.xMax - 16f)
             {
-                var localY = Event.current.mousePosition.y - dropdownRect.y - 8f + windowDropdownScroll;
+                var localY = mousePosition.y - dropdownRect.y - 8f + windowDropdownScroll;
                 var index = Mathf.FloorToInt(localY / rowHeight);
                 if (index >= 0 && index < count)
                 {
@@ -1822,42 +2250,47 @@ namespace DomeProjection
             else if (IsAllSkyCircularContent()) DrawAllSkyPlacementControls();
             else
             {
-                GUILayout.Label("表示方向");
-                settings.yaw = Slider("Yaw", settings.yaw, -180f, 180f, settings.yaw.ToString("0.0°"));
-                settings.pitch = Slider("Pitch", settings.pitch, -180f, 180f, settings.pitch.ToString("0.0°"));
-                settings.roll = Slider("Roll", settings.roll, -180f, 180f, settings.roll.ToString("0.0°"));
-                settings.domeFov = FineSlider("ドーム画角", settings.domeFov, 90f, 220f, 1f, settings.domeFov.ToString("0°"));
+                BeginSection("表示方向");
+                settings.yaw = Slider("Yaw", settings.yaw, -180f, 180f, settings.yaw.ToString("0.0°"), 0f);
+                settings.pitch = Slider("Pitch", settings.pitch, -180f, 180f, settings.pitch.ToString("0.0°"), 180f);
+                settings.roll = Slider("Roll", settings.roll, -180f, 180f, settings.roll.ToString("0.0°"), 0f);
+                settings.domeFov = FineSlider("ドーム画角", settings.domeFov, 90f, 220f, 1f, settings.domeFov.ToString("0°"), 180f);
+                EndSection();
             }
 
         }
 
         private void DrawCalibrationPanel()
         {
-            GUILayout.Label("校正表示");
+            BeginSection("校正表示");
             GUILayout.BeginHorizontal();
             GUILayout.Label("校正表示", GUILayout.Width(82f));
             if (GUILayout.Button(gridModeNames[settings.gridMode]))
                 settings.gridMode = (settings.gridMode + 1) % 3;
             GUILayout.EndHorizontal();
 
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("グリッド間隔", GUILayout.Width(82f));
+            GUILayout.BeginHorizontal(GUILayout.Height(28f));
+            GUILayout.Label("グリッド間隔", rowLabelStyle, GUILayout.Width(82f));
             if (GUILayout.Button(settings.gridStepDegrees.ToString("0°"), GUILayout.Width(54f)))
                 settings.gridStepDegrees = NextGridStep(settings.gridStepDegrees);
-            settings.gridOpacity = GUILayout.HorizontalSlider(settings.gridOpacity, 0.15f, 1f, sliderStyle, sliderThumbStyle, GUILayout.Width(120f));
-            GUILayout.Label("濃さ " + settings.gridOpacity.ToString("0.00"), GUILayout.Width(76f));
+            GUILayout.Label("押すたびに 1° / 2° / 5° / 10° / 15°", smallStyle,
+                GUILayout.ExpandWidth(true));
             GUILayout.EndHorizontal();
-            settings.gridLineWidth = FineSlider("線の太さ", settings.gridLineWidth, 0.25f, 1.5f, 0.05f, settings.gridLineWidth.ToString("0.00"));
+            settings.gridOpacity = FineSlider("グリッド濃さ", settings.gridOpacity, 0.15f, 1f,
+                0.05f, settings.gridOpacity.ToString("0.00"), 1f);
+            settings.gridLineWidth = FineSlider("線の太さ", settings.gridLineWidth, 0.25f, 1.5f, 0.05f, settings.gridLineWidth.ToString("0.00"), 0.65f);
             settings.showOrientationMarkers = GUILayout.Toggle(settings.showOrientationMarkers, "方位色マーカー（上:赤 右:緑 下:青 左:黄）");
+            EndSection();
 
-            GUILayout.Label("出力円");
-            settings.centerX = FineSlider("中心 X", settings.centerX, 0.25f, 0.75f, 0.001f, settings.centerX.ToString("0.000"));
-            settings.centerY = FineSlider("中心 Y", settings.centerY, 0.25f, 0.75f, 0.001f, settings.centerY.ToString("0.000"));
-            settings.radius = FineSlider("円半径", settings.radius, 0.2f, 0.7f, 0.001f, settings.radius.ToString("0.000"));
-            settings.ellipseX = FineSlider("横倍率", settings.ellipseX, 0.75f, 1.25f, 0.001f, settings.ellipseX.ToString("0.000"));
-            settings.ellipseY = FineSlider("縦倍率", settings.ellipseY, 0.75f, 1.25f, 0.001f, settings.ellipseY.ToString("0.000"));
-            settings.outputRotation = FineSlider("出力回転", settings.outputRotation, -180f, 180f, 0.1f, settings.outputRotation.ToString("0.0°"));
+            BeginSection("出力円");
+            settings.centerX = FineSlider("中心 X", settings.centerX, 0.25f, 0.75f, 0.001f, settings.centerX.ToString("0.000"), 0.5f);
+            settings.centerY = FineSlider("中心 Y", settings.centerY, 0.25f, 0.75f, 0.001f, settings.centerY.ToString("0.000"), 0.5f);
+            settings.radius = FineSlider("円半径", settings.radius, 0.2f, 0.7f, 0.001f, settings.radius.ToString("0.000"), 0.485f);
+            settings.ellipseX = FineSlider("横倍率", settings.ellipseX, 0.75f, 1.25f, 0.001f, settings.ellipseX.ToString("0.000"), 1f);
+            settings.ellipseY = FineSlider("縦倍率", settings.ellipseY, 0.75f, 1.25f, 0.001f, settings.ellipseY.ToString("0.000"), 1f);
+            settings.outputRotation = FineSlider("出力回転", settings.outputRotation, -180f, 180f, 0.1f, settings.outputRotation.ToString("0.0°"), 0f);
             if (GUILayout.Button("出力円をリセット")) settings.ResetOutputCircle();
+            EndSection();
         }
 
         private bool IsFlatContent()
@@ -1872,68 +2305,1528 @@ namespace DomeProjection
 
         private void DrawAllSkyPlacementControls()
         {
-            GUILayout.Label("全天円形素材の位置合わせ");
+            BeginSection("全天円形素材の位置合わせ");
             GUILayout.Label("素材内の円だけを調整します。投影円の位置・大きさは「校正」タブの出力円で調整します。", smallStyle);
             settings.allSkySourceCenterX = FineSlider("素材中心 X", settings.allSkySourceCenterX,
-                0f, 1f, 0.001f, settings.allSkySourceCenterX.ToString("0.000"));
+                0f, 1f, 0.001f, settings.allSkySourceCenterX.ToString("0.000"), 0.5f);
             settings.allSkySourceCenterY = FineSlider("素材中心 Y", settings.allSkySourceCenterY,
-                0f, 1f, 0.001f, settings.allSkySourceCenterY.ToString("0.000"));
+                0f, 1f, 0.001f, settings.allSkySourceCenterY.ToString("0.000"), 0.5f);
             settings.allSkySourceRadius = FineSlider("素材円半径", settings.allSkySourceRadius,
-                0.1f, 1.5f, 0.005f, settings.allSkySourceRadius.ToString("0.000"));
+                0.1f, 1.5f, 0.005f, settings.allSkySourceRadius.ToString("0.000"), 1f);
             settings.allSkySourceRotation = FineSlider("素材回転", settings.allSkySourceRotation,
-                -180f, 180f, 0.5f, settings.allSkySourceRotation.ToString("0.0°"));
+                -180f, 180f, 0.5f, settings.allSkySourceRotation.ToString("0.0°"), 0f);
             GUILayout.Label("入力魚眼の補正（投影レンズのK1–K3とは別です）", smallStyle);
             settings.allSkySourceRadialK1 = FineSlider("入力 K1", settings.allSkySourceRadialK1,
-                -0.3f, 0.3f, 0.001f, settings.allSkySourceRadialK1.ToString("0.000"));
+                -0.3f, 0.3f, 0.001f, settings.allSkySourceRadialK1.ToString("0.000"), 0f);
             settings.allSkySourceRadialK2 = FineSlider("入力 K2", settings.allSkySourceRadialK2,
-                -0.3f, 0.3f, 0.001f, settings.allSkySourceRadialK2.ToString("0.000"));
+                -0.3f, 0.3f, 0.001f, settings.allSkySourceRadialK2.ToString("0.000"), 0f);
             if (GUILayout.Button("全天円形素材の位置をリセット")) settings.ResetAllSkyPlacement();
+            EndSection();
         }
 
         private void DrawFlatPlacementControls()
         {
-            GUILayout.Label("平面資料の配置");
+            BeginSection("平面資料の配置");
             settings.flatAzimuth = FineSlider("左右方向", settings.flatAzimuth, -180f, 180f, 1f,
-                settings.flatAzimuth.ToString("0°"));
+                settings.flatAzimuth.ToString("0°"), 0f);
             settings.flatPolarAngle = FineSlider("中心→外周", settings.flatPolarAngle, 0f, 89f, 1f,
-                settings.flatPolarAngle.ToString("0°"));
+                settings.flatPolarAngle.ToString("0°"), 45f);
             settings.flatRoll = FineSlider("資料の回転", settings.flatRoll, -180f, 180f, 0.5f,
-                settings.flatRoll.ToString("0.0°"));
+                settings.flatRoll.ToString("0.0°"), 180f);
             settings.flatHorizontalFov = FineSlider("横の画角", settings.flatHorizontalFov, 10f, 160f, 1f,
-                settings.flatHorizontalFov.ToString("0°"));
+                settings.flatHorizontalFov.ToString("0°"), 100f);
             settings.flatHeightScale = FineSlider("縦倍率", settings.flatHeightScale, 0.5f, 2f, 0.01f,
-                settings.flatHeightScale.ToString("0.00"));
+                settings.flatHeightScale.ToString("0.00"), 1f);
 
             GUILayout.Label("端の切り取り", smallStyle);
             settings.flatCropLeft = FineSlider("左", settings.flatCropLeft, 0f, 0.3f, 0.002f,
-                settings.flatCropLeft.ToString("0.000"));
+                settings.flatCropLeft.ToString("0.000"), 0f);
             settings.flatCropRight = FineSlider("右", settings.flatCropRight, 0f, 0.3f, 0.002f,
-                settings.flatCropRight.ToString("0.000"));
+                settings.flatCropRight.ToString("0.000"), 0f);
             settings.flatCropTop = FineSlider("上", settings.flatCropTop, 0f, 0.3f, 0.002f,
-                settings.flatCropTop.ToString("0.000"));
+                settings.flatCropTop.ToString("0.000"), 0f);
             settings.flatCropBottom = FineSlider("下", settings.flatCropBottom, 0f, 0.3f, 0.002f,
-                settings.flatCropBottom.ToString("0.000"));
+                settings.flatCropBottom.ToString("0.000"), 0f);
             if (GUILayout.Button("平面資料の配置をリセット")) settings.ResetFlatPlacement();
+            EndSection();
         }
 
         private void DrawLensPanel()
         {
-            GUILayout.Label("レンズ歪み補正");
-            GUILayout.Label("K1–K3は円周方向の間隔、P1/P2は偏心・斜め方向の非対称を補正します。", smallStyle);
-            settings.radialK1 = FineSlider("放射 K1", settings.radialK1, -0.3f, 0.3f, 0.001f, settings.radialK1.ToString("0.000"));
-            settings.radialK2 = FineSlider("放射 K2", settings.radialK2, -0.3f, 0.3f, 0.001f, settings.radialK2.ToString("0.000"));
-            settings.radialK3 = FineSlider("放射 K3", settings.radialK3, -0.3f, 0.3f, 0.001f, settings.radialK3.ToString("0.000"));
-            settings.tangentialP1 = FineSlider("偏心 P1", settings.tangentialP1, -0.15f, 0.15f, 0.001f, settings.tangentialP1.ToString("0.000"));
-            settings.tangentialP2 = FineSlider("偏心 P2", settings.tangentialP2, -0.15f, 0.15f, 0.001f, settings.tangentialP2.ToString("0.000"));
+            BeginSection("校正ヘルプ");
+            if (GUILayout.Button(showLensCalibrationHelp
+                    ? "▼  レンズ校正の進め方を閉じる"
+                    : "▶  レンズ校正の進め方を表示"))
+                showLensCalibrationHelp = !showLensCalibrationHelp;
+            if (showLensCalibrationHelp)
+            {
+                GUILayout.Label("1.「校正」タブで中心・円半径・縦横倍率を実際のドーム外周へ合わせます。\n"
+                    + "2. まずK1だけを少しずつ動かし、角度リングの中間～外側のずれを合わせます。\n"
+                    + "3. 外周付近だけ残るずれをK2、さらに外周端だけをK3で微調整します。\n"
+                    + "4. 上下左右で非対称なずれが残る場合だけP1/P2、方向別補正を使います。",
+                    smallStyle);
+                GUILayout.Label("一度に1項目だけ、±0.001程度ずつ動かすのがおすすめです。「既定」でその項目だけ元へ戻せます。", smallStyle);
+            }
+            EndSection();
 
-            GUILayout.Space(8f);
-            GUILayout.Label("方向別補正（レンズ2枚重ね・偏心配置向け）");
+            BeginSection("円対称の歪み補正");
+            GUILayout.Label("K1は全体、K2は主に外側、K3は主に外周端へ強く効きます。", smallStyle);
+            GUILayout.Label("＋側では角度リングが中心側へ、－側では外周側へ移動します。", smallStyle);
+            settings.radialK1 = FineSlider("放射 K1", settings.radialK1, -0.3f, 0.3f, 0.001f, settings.radialK1.ToString("0.000"), 0f);
+            settings.radialK2 = FineSlider("放射 K2", settings.radialK2, -0.3f, 0.3f, 0.001f, settings.radialK2.ToString("0.000"), 0f);
+            settings.radialK3 = FineSlider("放射 K3", settings.radialK3, -0.3f, 0.3f, 0.001f, settings.radialK3.ToString("0.000"), 0f);
+            EndSection();
+
+            BeginSection("偏心・斜め方向の補正");
+            GUILayout.Label("中心と縦横倍率を合わせてもリングが片側へ寄る場合だけ使います。P1は主に上下、P2は主に左右の偏心へ効きます。", smallStyle);
+            settings.tangentialP1 = FineSlider("偏心 P1", settings.tangentialP1, -0.15f, 0.15f, 0.001f, settings.tangentialP1.ToString("0.000"), 0f);
+            settings.tangentialP2 = FineSlider("偏心 P2", settings.tangentialP2, -0.15f, 0.15f, 0.001f, settings.tangentialP2.ToString("0.000"), 0f);
+            EndSection();
+
+            BeginSection("方向別補正（レンズ2枚重ね・偏心配置向け）");
             GUILayout.Label("各方向だけリング間隔がずれる場合に調整します。正値でその方向の画角を広げます。", smallStyle);
-            settings.warpTop = FineSlider("上方向", settings.warpTop, -0.3f, 0.3f, 0.001f, settings.warpTop.ToString("0.000"));
-            settings.warpBottom = FineSlider("下方向", settings.warpBottom, -0.3f, 0.3f, 0.001f, settings.warpBottom.ToString("0.000"));
-            settings.warpLeft = FineSlider("左方向", settings.warpLeft, -0.3f, 0.3f, 0.001f, settings.warpLeft.ToString("0.000"));
-            settings.warpRight = FineSlider("右方向", settings.warpRight, -0.3f, 0.3f, 0.001f, settings.warpRight.ToString("0.000"));
-            if (GUILayout.Button("レンズ補正をリセット")) settings.ResetLensCalibration();
+            settings.warpTop = FineSlider("上方向", settings.warpTop, -0.3f, 0.3f, 0.001f, settings.warpTop.ToString("0.000"), 0f);
+            settings.warpBottom = FineSlider("下方向", settings.warpBottom, -0.3f, 0.3f, 0.001f, settings.warpBottom.ToString("0.000"), 0f);
+            settings.warpLeft = FineSlider("左方向", settings.warpLeft, -0.3f, 0.3f, 0.001f, settings.warpLeft.ToString("0.000"), 0f);
+            settings.warpRight = FineSlider("右方向", settings.warpRight, -0.3f, 0.3f, 0.001f, settings.warpRight.ToString("0.000"), 0f);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("歪み補正をすべて0へ")) settings.ResetLensCalibration();
+            if (GUILayout.Button("出力円も含め全て初期値へ"))
+            {
+                settings.domeFov = 180f;
+                settings.ResetOutputCircle();
+                settings.ResetLensCalibration();
+            }
+            GUILayout.EndHorizontal();
+            EndSection();
+
+            DrawLensProfileControls();
+        }
+
+        private void DrawLensProfileControls()
+        {
+            BeginSection("レンズ設定の保存／読込");
+            GUILayout.Label("出力円・ドーム画角・K1～K3・P1/P2・方向別補正をまとめて保存します。素材の向きや再生設定は変わりません。", smallStyle);
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("保存名", GUILayout.Width(58f));
+            GUI.SetNextControlName(LensProfileInputName);
+            lensProfileName = GUILayout.TextField(lensProfileName ?? string.Empty, GUILayout.ExpandWidth(true));
+            if (GUILayout.Button("現在値を保存", GUILayout.Width(100f))) SaveLensProfile();
+            GUILayout.EndHorizontal();
+            GUILayout.Label("同じ名前で保存すると、そのプロファイルを更新します。日本語名も使用できます。", smallStyle);
+
+            if (lensProfileNames.Length == 0)
+            {
+                GUILayout.Label("保存済みプロファイル: なし", smallStyle);
+                EndSection();
+                return;
+            }
+
+            selectedLensProfileIndex = Mathf.Clamp(selectedLensProfileIndex, 0, lensProfileNames.Length - 1);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("◀", GUILayout.Width(34f))) SelectLensProfile(selectedLensProfileIndex - 1);
+            GUILayout.Box(TruncateLabel(lensProfileNames[selectedLensProfileIndex], 28), GUILayout.ExpandWidth(true));
+            if (GUILayout.Button("▶", GUILayout.Width(34f))) SelectLensProfile(selectedLensProfileIndex + 1);
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("選択した設定を読込")) LoadSelectedLensProfile();
+            if (GUILayout.Button("一覧を更新", GUILayout.Width(88f))) RefreshLensProfiles();
+            GUILayout.EndHorizontal();
+
+            var selectedPath = lensProfilePaths[selectedLensProfileIndex];
+            if (string.Equals(pendingLensProfileDeletePath, selectedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                GUILayout.Label("「" + TruncateLabel(pendingLensProfileDeleteName, 24)
+                    + "」を削除しますか？ 現在の画面上の調整値は変わりません。", smallStyle);
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("削除を確定")) DeletePendingLensProfile();
+                if (GUILayout.Button("キャンセル")) CancelLensProfileDelete();
+                GUILayout.EndHorizontal();
+            }
+            else if (GUILayout.Button("選択した設定を削除"))
+            {
+                pendingLensProfileDeletePath = selectedPath;
+                pendingLensProfileDeleteName = lensProfileNames[selectedLensProfileIndex];
+            }
+            EndSection();
+        }
+
+        private void SelectLensProfile(int index)
+        {
+            if (lensProfileNames.Length == 0)
+            {
+                selectedLensProfileIndex = -1;
+                return;
+            }
+
+            selectedLensProfileIndex = (index % lensProfileNames.Length + lensProfileNames.Length)
+                                       % lensProfileNames.Length;
+            lensProfileName = lensProfileNames[selectedLensProfileIndex];
+            CancelLensProfileDelete();
+        }
+
+        private void RefreshLensProfiles(string selectPath = null)
+        {
+            var previousPath = selectPath;
+            if (string.IsNullOrWhiteSpace(previousPath)
+                && selectedLensProfileIndex >= 0
+                && selectedLensProfileIndex < lensProfilePaths.Length)
+                previousPath = lensProfilePaths[selectedLensProfileIndex];
+
+            var paths = new List<string>();
+            var names = new List<string>();
+            try
+            {
+                if (Directory.Exists(LensProfileDirectory))
+                {
+                    var files = Directory.GetFiles(LensProfileDirectory, "*.json");
+                    Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+                    foreach (var path in files)
+                    {
+                        try
+                        {
+                            var profile = JsonUtility.FromJson<LensCalibrationProfile>(File.ReadAllText(path));
+                            if (profile == null) continue;
+                            paths.Add(path);
+                            names.Add(string.IsNullOrWhiteSpace(profile.displayName)
+                                ? Path.GetFileNameWithoutExtension(path)
+                                : profile.displayName.Trim());
+                        }
+                        catch (Exception exception)
+                        {
+                            UnityEngine.Debug.LogWarning("Lens profile could not be read: " + exception.Message);
+                        }
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                status = "レンズ設定一覧の読込エラー: " + exception.Message;
+            }
+
+            lensProfilePaths = paths.ToArray();
+            lensProfileNames = names.ToArray();
+            // Profile files use GUIDs so Japanese and Windows-reserved names
+            // are always safe on disk. Present them alphabetically by their
+            // human-readable names instead of that internal filename order.
+            for (var i = 0; i < lensProfileNames.Length; i++)
+            {
+                for (var j = i + 1; j < lensProfileNames.Length; j++)
+                {
+                    if (string.Compare(lensProfileNames[i], lensProfileNames[j],
+                            StringComparison.CurrentCultureIgnoreCase) <= 0) continue;
+                    (lensProfileNames[i], lensProfileNames[j]) = (lensProfileNames[j], lensProfileNames[i]);
+                    (lensProfilePaths[i], lensProfilePaths[j]) = (lensProfilePaths[j], lensProfilePaths[i]);
+                }
+            }
+            selectedLensProfileIndex = lensProfilePaths.Length == 0 ? -1 : 0;
+            if (!string.IsNullOrWhiteSpace(previousPath))
+            {
+                for (var i = 0; i < lensProfilePaths.Length; i++)
+                {
+                    if (!string.Equals(lensProfilePaths[i], previousPath, StringComparison.OrdinalIgnoreCase)) continue;
+                    selectedLensProfileIndex = i;
+                    break;
+                }
+            }
+
+            if (selectedLensProfileIndex >= 0 && string.IsNullOrWhiteSpace(lensProfileName))
+                lensProfileName = lensProfileNames[selectedLensProfileIndex];
+            if (!string.IsNullOrWhiteSpace(pendingLensProfileDeletePath)
+                && Array.IndexOf(lensProfilePaths, pendingLensProfileDeletePath) < 0)
+                CancelLensProfileDelete();
+        }
+
+        private void SaveLensProfile()
+        {
+            var requestedName = (lensProfileName ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(requestedName))
+            {
+                status = "レンズ設定の保存名を入力してください";
+                return;
+            }
+
+            if (requestedName.Length > 80) requestedName = requestedName.Substring(0, 80);
+            try
+            {
+                Directory.CreateDirectory(LensProfileDirectory);
+                var savePath = string.Empty;
+                for (var i = 0; i < lensProfileNames.Length; i++)
+                {
+                    if (!string.Equals(lensProfileNames[i], requestedName, StringComparison.OrdinalIgnoreCase)) continue;
+                    savePath = lensProfilePaths[i];
+                    break;
+                }
+
+                if (string.IsNullOrWhiteSpace(savePath))
+                    savePath = Path.Combine(LensProfileDirectory, Guid.NewGuid().ToString("N") + ".json");
+
+                var profile = LensCalibrationProfile.Capture(requestedName, settings);
+                File.WriteAllText(savePath, JsonUtility.ToJson(profile, true));
+                lensProfileName = requestedName;
+                RefreshLensProfiles(savePath);
+                status = "レンズ設定を保存しました: " + requestedName;
+            }
+            catch (Exception exception)
+            {
+                status = "レンズ設定の保存エラー: " + exception.Message;
+            }
+        }
+
+        private void LoadSelectedLensProfile()
+        {
+            if (selectedLensProfileIndex < 0 || selectedLensProfileIndex >= lensProfilePaths.Length)
+            {
+                status = "読込むレンズ設定を選択してください";
+                return;
+            }
+
+            try
+            {
+                var profile = JsonUtility.FromJson<LensCalibrationProfile>(
+                    File.ReadAllText(lensProfilePaths[selectedLensProfileIndex]));
+                if (profile == null) throw new InvalidDataException("JSONの内容が空です。");
+                profile.ApplyTo(settings);
+                lensProfileName = lensProfileNames[selectedLensProfileIndex];
+                SaveSettings();
+                status = "レンズ設定を読込みました: " + lensProfileName;
+            }
+            catch (Exception exception)
+            {
+                status = "レンズ設定の読込エラー: " + exception.Message;
+            }
+        }
+
+        private void DeletePendingLensProfile()
+        {
+            var deletePath = pendingLensProfileDeletePath;
+            var deleteName = pendingLensProfileDeleteName;
+            if (string.IsNullOrWhiteSpace(deletePath)) return;
+
+            try
+            {
+                if (File.Exists(deletePath)) File.Delete(deletePath);
+                CancelLensProfileDelete();
+                lensProfileName = string.Empty;
+                RefreshLensProfiles();
+                status = "レンズ設定を削除しました: " + deleteName;
+            }
+            catch (Exception exception)
+            {
+                CancelLensProfileDelete();
+                status = "レンズ設定の削除エラー: " + exception.Message;
+            }
+        }
+
+        private void CancelLensProfileDelete()
+        {
+            pendingLensProfileDeletePath = string.Empty;
+            pendingLensProfileDeleteName = string.Empty;
+        }
+
+        private void InitializeConfigurationStore()
+        {
+            var fallback = Path.Combine(
+                Path.GetDirectoryName(SettingsPath) ?? Application.persistentDataPath,
+                "DomeProjectionConfig");
+            var preferred = GetPreferredConfigurationDirectory();
+            try
+            {
+                configurationStore = new DomeConfigurationStore(preferred);
+            }
+            catch (Exception exception)
+            {
+                UnityEngine.Debug.LogWarning("External config directory is not writable: " + exception.Message);
+                configurationStore = new DomeConfigurationStore(fallback);
+            }
+
+            MigrateLegacyLensProfiles();
+        }
+
+        private static string GetPreferredConfigurationDirectory()
+        {
+#if UNITY_EDITOR
+            var baseDirectory = Directory.GetParent(Application.dataPath)?.FullName
+                                ?? Application.persistentDataPath;
+#elif UNITY_STANDALONE_OSX
+            // Unity's dataPath is inside App.app/Contents/Resources/Data. Walk
+            // out of the bundle and store JSON beside the .app bundles, never
+            // inside the signed/read-only application.
+            var bundle = new DirectoryInfo(Application.dataPath);
+            while (bundle != null && !bundle.Name.EndsWith(".app", StringComparison.OrdinalIgnoreCase))
+                bundle = bundle.Parent;
+            var baseDirectory = bundle?.Parent?.FullName ?? Application.persistentDataPath;
+#elif UNITY_STANDALONE_WIN
+            var executable = Process.GetCurrentProcess().MainModule?.FileName;
+            var executableDirectory = new DirectoryInfo(
+                Path.GetDirectoryName(executable) ?? Application.persistentDataPath);
+            // Control and Output live in sibling directories in the Windows
+            // package, so keep one shared configuration in their parent.
+            var baseDirectory = string.Equals(executableDirectory.Name, "Control", StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(executableDirectory.Name, "Output", StringComparison.OrdinalIgnoreCase)
+                ? executableDirectory.Parent?.FullName ?? executableDirectory.FullName
+                : executableDirectory.FullName;
+#else
+            var baseDirectory = Application.persistentDataPath;
+#endif
+            return Path.Combine(baseDirectory, "DomeProjectionConfig");
+        }
+
+        private void MigrateLegacyLensProfiles()
+        {
+            if (configurationStore == null
+                || string.Equals(LegacyLensProfileDirectory, configurationStore.LensDirectoryPath,
+                    StringComparison.OrdinalIgnoreCase)
+                || !Directory.Exists(LegacyLensProfileDirectory)) return;
+
+            try
+            {
+                foreach (var sourcePath in Directory.GetFiles(LegacyLensProfileDirectory, "*.json"))
+                {
+                    var destination = Path.Combine(configurationStore.LensDirectoryPath,
+                        Path.GetFileName(sourcePath));
+                    if (!File.Exists(destination)) File.Copy(sourcePath, destination, false);
+                }
+            }
+            catch (Exception exception)
+            {
+                UnityEngine.Debug.LogWarning("Legacy lens profiles could not be copied: " + exception.Message);
+            }
+        }
+
+        private void ReloadContentConfiguration(bool announce)
+        {
+            if (configurationStore == null) return;
+            try
+            {
+                materialCatalog = configurationStore.LoadMaterials();
+                playlistCatalog = configurationStore.LoadPlaylists();
+                selectedMaterialIndex = materialCatalog.materials.Count == 0
+                    ? -1
+                    : Mathf.Clamp(selectedMaterialIndex, 0, materialCatalog.materials.Count - 1);
+                selectedPlaylistIndex = playlistCatalog.playlists.Count == 0
+                    ? -1
+                    : Mathf.Clamp(selectedPlaylistIndex, 0, playlistCatalog.playlists.Count - 1);
+                materialNameField = selectedMaterialIndex >= 0
+                    ? materialCatalog.materials[selectedMaterialIndex].name
+                    : string.Empty;
+                playlistNameField = selectedPlaylistIndex >= 0
+                    ? playlistCatalog.playlists[selectedPlaylistIndex].name
+                    : string.Empty;
+                selectedPlaylistEntryIndex = -1;
+                activePlaylistIndex = -1;
+                activePlaylistEntryIndex = -1;
+                activePlaylistCompleted = false;
+                pendingContentDeleteKind = string.Empty;
+                pendingContentDeleteId = string.Empty;
+                RefreshLensProfiles();
+                if (announce) status = "JSON設定を再読込しました";
+            }
+            catch (Exception exception)
+            {
+                status = "JSON設定の読込エラー: " + exception.Message;
+            }
+        }
+
+        private void OpenConfigurationDirectory()
+        {
+            if (configurationStore == null) return;
+            try
+            {
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = "\"" + configurationStore.DirectoryPath + "\"",
+                    UseShellExecute = true
+                })?.Dispose();
+#else
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = "/usr/bin/open",
+                    UseShellExecute = false
+                };
+                startInfo.ArgumentList.Add(configurationStore.DirectoryPath);
+                Process.Start(startInfo)?.Dispose();
+#endif
+                status = "設定フォルダを開きました";
+            }
+            catch (Exception exception)
+            {
+                status = "設定フォルダを開けませんでした: " + exception.Message;
+            }
+        }
+
+        private void DrawContentLibraryPanel()
+        {
+            GUILayout.Label("JSON設定フォルダ");
+            GUILayout.Label(configurationStore?.DirectoryPath ?? "利用できません", smallStyle);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("設定フォルダを開く")) OpenConfigurationDirectory();
+            if (GUILayout.Button("JSONを再読込")) ReloadContentConfiguration(true);
+            GUILayout.EndHorizontal();
+            GUILayout.Label("起動時自動読込・相対パス基準：このフォルダ", smallStyle);
+
+            GUILayout.Space(10f);
+            DrawMaterialLibraryControls();
+            GUILayout.Space(6f);
+            DrawAddMaterialToPlaylistControl();
+            GUILayout.Space(6f);
+            DrawPlaylistControls();
+        }
+
+        private void DrawAddMaterialToPlaylistControl()
+        {
+            var canAdd = selectedMaterialIndex >= 0
+                         && selectedMaterialIndex < materialCatalog.materials.Count
+                         && selectedPlaylistIndex >= 0
+                         && selectedPlaylistIndex < playlistCatalog.playlists.Count;
+            GUILayout.BeginVertical(sectionStyle);
+            GUI.enabled = canAdd;
+            var destination = canAdd
+                ? playlistCatalog.playlists[selectedPlaylistIndex].name
+                : "プレイリスト未選択";
+            if (GUILayout.Button("↓  選択素材を「" + TruncateLabel(destination, 22) + "」の末尾へ追加",
+                    GUILayout.Height(32f)))
+                AddSelectedMaterialToPlaylist();
+            GUI.enabled = true;
+            GUILayout.EndVertical();
+        }
+
+        private void DrawMaterialLibraryControls()
+        {
+            BeginSection("素材リスト（materials.json）");
+            GUI.SetNextControlName(MaterialNameInputName);
+            materialNameField = GUILayout.TextField(materialNameField ?? string.Empty);
+            GUILayout.Label("名前を入力し、現在選択中のファイルと表示設定を登録します。", smallStyle);
+            if (GUILayout.Button("現在の素材を新規追加")) AddCurrentMaterial();
+
+            if (materialCatalog.materials.Count == 0)
+            {
+                GUILayout.Label("登録素材: なし", smallStyle);
+                EndSection();
+                return;
+            }
+
+            selectedMaterialIndex = Mathf.Clamp(selectedMaterialIndex, 0, materialCatalog.materials.Count - 1);
+            GUILayout.Label("登録素材を選択", smallStyle);
+            var materialClicked = -1;
+            for (var i = 0; i < materialCatalog.materials.Count; i++)
+            {
+                var item = materialCatalog.materials[i];
+                var label = (i + 1) + ". " + TruncateLabel(item.name, 38);
+                if (GUILayout.Button(label, i == selectedMaterialIndex ? selectedListButtonStyle : dropdownButtonStyle,
+                        GUILayout.Height(26f)))
+                    materialClicked = i;
+            }
+            if (materialClicked >= 0) SelectMaterial(materialClicked);
+
+            var selected = materialCatalog.materials[selectedMaterialIndex];
+            GUILayout.Label(TruncateLabel(selected.path, 58), smallStyle);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("選択素材を表示")) LoadMaterial(selected, false);
+            if (GUILayout.Button("現在値で更新")) UpdateSelectedMaterial();
+            GUILayout.EndHorizontal();
+
+            if (pendingContentDeleteKind == "material" && pendingContentDeleteId == selected.id)
+            {
+                GUILayout.Label("この素材と、プレイリスト内の参照を削除しますか？", smallStyle);
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("削除を確定")) DeleteSelectedMaterial();
+                if (GUILayout.Button("キャンセル")) CancelContentDelete();
+                GUILayout.EndHorizontal();
+            }
+            else if (GUILayout.Button("選択素材をリストから削除"))
+            {
+                pendingContentDeleteKind = "material";
+                pendingContentDeleteId = selected.id;
+            }
+            EndSection();
+        }
+
+        private void DrawPlaylistControls()
+        {
+            BeginSection("プレイリスト（playlists.json）");
+            GUILayout.BeginHorizontal();
+            GUI.SetNextControlName(PlaylistNameInputName);
+            playlistNameField = GUILayout.TextField(playlistNameField ?? string.Empty, GUILayout.ExpandWidth(true));
+            if (GUILayout.Button("新規作成", GUILayout.Width(82f))) AddPlaylist();
+            GUILayout.EndHorizontal();
+
+            if (playlistCatalog.playlists.Count == 0)
+            {
+                GUILayout.Label("プレイリスト: なし", smallStyle);
+                EndSection();
+                return;
+            }
+
+            selectedPlaylistIndex = Mathf.Clamp(selectedPlaylistIndex, 0, playlistCatalog.playlists.Count - 1);
+            GUILayout.Label("プレイリストを選択", smallStyle);
+            var playlistClicked = -1;
+            var playlistRenameClicked = -1;
+            var playlistDeleteClicked = -1;
+            for (var i = 0; i < playlistCatalog.playlists.Count; i++)
+            {
+                var item = playlistCatalog.playlists[i];
+                var label = (i + 1) + ". " + TruncateLabel(item.name, 38);
+                GUILayout.BeginHorizontal(GUILayout.Height(26f));
+                if (GUILayout.Button(label, i == selectedPlaylistIndex ? selectedListButtonStyle : dropdownButtonStyle,
+                        GUILayout.Height(26f), GUILayout.ExpandWidth(true)))
+                    playlistClicked = i;
+                if (GUILayout.Button(new GUIContent("✎", "上の名前欄の内容で更新"),
+                        GUILayout.Width(30f), GUILayout.Height(26f)))
+                    playlistRenameClicked = i;
+                if (GUILayout.Button(new GUIContent("✕", "このプレイリストを削除"),
+                        GUILayout.Width(30f), GUILayout.Height(26f)))
+                    playlistDeleteClicked = i;
+                GUILayout.EndHorizontal();
+            }
+            if (playlistClicked >= 0) SelectPlaylist(playlistClicked);
+            if (playlistRenameClicked >= 0)
+            {
+                if (playlistRenameClicked != selectedPlaylistIndex)
+                {
+                    SelectPlaylist(playlistRenameClicked);
+                    status = "上の名前欄を編集し、もう一度✎を押してください";
+                }
+                else
+                {
+                    RenameSelectedPlaylist();
+                }
+            }
+            if (playlistDeleteClicked >= 0)
+            {
+                if (playlistDeleteClicked != selectedPlaylistIndex) SelectPlaylist(playlistDeleteClicked);
+                pendingContentDeleteKind = "playlist";
+                pendingContentDeleteId = playlistCatalog.playlists[selectedPlaylistIndex].id;
+            }
+
+            var playlist = playlistCatalog.playlists[selectedPlaylistIndex];
+            GUILayout.Label("素材間のつなぎ", smallStyle);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("カット", playlist.transitionMode == 0 ? activeTabStyle : tabStyle))
+            {
+                playlist.transitionMode = 0;
+                ResetPlaylistTransition();
+                SavePlaylistCatalog();
+            }
+            if (GUILayout.Button("黒フェード", playlist.transitionMode == 1 ? activeTabStyle : tabStyle))
+            {
+                playlist.transitionMode = 1;
+                ResetPlaylistTransition();
+                SavePlaylistCatalog();
+            }
+            GUILayout.EndHorizontal();
+            if (playlist.transitionMode == 1)
+            {
+                var duration = FineSlider("フェード時間", playlist.transitionSeconds,
+                    0.2f, 3f, 0.1f, playlist.transitionSeconds.ToString("F1") + "秒", 0.8f);
+                if (Mathf.Abs(duration - playlist.transitionSeconds) > 0.001f)
+                {
+                    playlist.transitionSeconds = duration;
+                    SavePlaylistCatalog();
+                }
+            }
+
+            if (playlist.materialIds.Count == 0)
+            {
+                GUILayout.Label("再生項目: なし", smallStyle);
+            }
+            else
+            {
+                selectedPlaylistEntryIndex = Mathf.Clamp(selectedPlaylistEntryIndex, 0,
+                    playlist.materialIds.Count - 1);
+                GUILayout.Label("プレイリストの中身", smallStyle);
+                GUILayout.Label("緑：再生中　青：選択中", smallStyle);
+                var entryClicked = -1;
+                var entryMoveIndex = -1;
+                var entryMoveDirection = 0;
+                var entryRemoveIndex = -1;
+                for (var i = 0; i < playlist.materialIds.Count; i++)
+                {
+                    var entryMaterial = FindMaterial(playlist.materialIds[i]);
+                    var isActiveEntry = activePlaylistIndex == selectedPlaylistIndex
+                                        && activePlaylistEntryIndex == i;
+                    var entryLabel = (isActiveEntry ? "▶ " : string.Empty) + (i + 1) + ". "
+                        + TruncateLabel(entryMaterial?.name ?? "⚠ 素材IDが見つかりません", 36);
+                    var isSelectedEntry = i == selectedPlaylistEntryIndex;
+                    GUILayout.BeginHorizontal(GUILayout.Height(26f));
+                    if (GUILayout.Button(entryLabel,
+                            isActiveEntry ? playingListButtonStyle
+                                : isSelectedEntry ? selectedListButtonStyle : dropdownButtonStyle,
+                            GUILayout.Height(26f), GUILayout.ExpandWidth(true)))
+                        entryClicked = i;
+                    GUI.enabled = i > 0;
+                    if (GUILayout.Button(new GUIContent("▲", "上へ移動"),
+                            GUILayout.Width(28f), GUILayout.Height(26f)))
+                    {
+                        entryMoveIndex = i;
+                        entryMoveDirection = -1;
+                    }
+                    GUI.enabled = i < playlist.materialIds.Count - 1;
+                    if (GUILayout.Button(new GUIContent("▼", "下へ移動"),
+                            GUILayout.Width(28f), GUILayout.Height(26f)))
+                    {
+                        entryMoveIndex = i;
+                        entryMoveDirection = 1;
+                    }
+                    GUI.enabled = true;
+                    if (GUILayout.Button(new GUIContent("✕", "プレイリストから外す"),
+                            GUILayout.Width(28f), GUILayout.Height(26f)))
+                        entryRemoveIndex = i;
+                    GUILayout.EndHorizontal();
+                }
+                if (entryClicked >= 0) selectedPlaylistEntryIndex = entryClicked;
+                if (entryMoveIndex >= 0)
+                {
+                    selectedPlaylistEntryIndex = entryMoveIndex;
+                    MovePlaylistEntry(entryMoveDirection);
+                }
+                if (entryRemoveIndex >= 0)
+                {
+                    selectedPlaylistEntryIndex = entryRemoveIndex;
+                    RemovePlaylistEntry();
+                }
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button(new GUIContent("|◀ 前へ", "前の素材")))
+                    AdvanceActivePlaylist(-1);
+                if (GUILayout.Button(new GUIContent("▶ 再生", "選択項目から再生")))
+                    StartSelectedPlaylist();
+                if (GUILayout.Button(new GUIContent("次へ ▶|", "次の素材")))
+                    AdvanceActivePlaylist(1);
+                GUILayout.EndHorizontal();
+            }
+
+            if (activePlaylistIndex >= 0 && activePlaylistIndex < playlistCatalog.playlists.Count)
+            {
+                var active = playlistCatalog.playlists[activePlaylistIndex];
+                GUILayout.Label((activePlaylistCompleted ? "再生完了: " : "再生中: ")
+                    + active.name + "  " + (activePlaylistEntryIndex + 1)
+                    + " / " + active.materialIds.Count, smallStyle);
+            }
+
+            if (pendingContentDeleteKind == "playlist" && pendingContentDeleteId == playlist.id)
+            {
+                GUILayout.Label("このプレイリストを削除しますか？ 素材自体は残ります。", smallStyle);
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("削除を確定")) DeleteSelectedPlaylist();
+                if (GUILayout.Button("キャンセル")) CancelContentDelete();
+                GUILayout.EndHorizontal();
+            }
+            EndSection();
+        }
+
+        private void DrawPlaylistSeekBar(DomePlaylistDefinition playlist, int playlistIndex, bool large)
+        {
+            var count = playlist.materialIds.Count;
+            if (count == 0) return;
+
+            GUILayout.Label("プレイリスト再生位置（クリック・ドラッグで移動）", smallStyle);
+            var outerHeight = large ? 34f : 28f;
+            var outer = GUILayoutUtility.GetRect(1f, outerHeight, GUILayout.ExpandWidth(true));
+            var barHeight = large ? 16f : 12f;
+            var bar = new Rect(outer.x + 2f, outer.center.y - barHeight * 0.5f,
+                outer.width - 4f, barHeight);
+            GUI.DrawTexture(bar, chapterPendingTexture, ScaleMode.StretchToFill);
+            var totalWeight = 0f;
+            var weights = new float[count];
+            var knownDurationTotal = 0f;
+            var knownDurationCount = 0;
+            for (var i = 0; i < count; i++)
+            {
+                var material = FindMaterial(playlist.materialIds[i]);
+                if (material == null || material.durationSeconds <= 0f) continue;
+                knownDurationTotal += material.durationSeconds;
+                knownDurationCount++;
+            }
+            var fallbackDuration = knownDurationCount > 0
+                ? knownDurationTotal / knownDurationCount
+                : 1f;
+            for (var i = 0; i < count; i++)
+            {
+                var material = FindMaterial(playlist.materialIds[i]);
+                weights[i] = material != null && material.durationSeconds > 0f
+                    ? material.durationSeconds
+                    : fallbackDuration;
+                totalWeight += weights[i];
+            }
+
+            var activeThisPlaylist = activePlaylistIndex == playlistIndex;
+            var x = bar.x;
+            var thumbX = -1f;
+            for (var i = 0; i < count; i++)
+            {
+                var width = i == count - 1
+                    ? bar.xMax - x
+                    : bar.width * weights[i] / Mathf.Max(totalWeight, 0.001f);
+                var segment = new Rect(x, bar.y, Mathf.Max(1f, width), bar.height);
+                var isActive = activeThisPlaylist && activePlaylistEntryIndex == i;
+                var isComplete = activeThisPlaylist && i < activePlaylistEntryIndex;
+                if (isComplete) GUI.DrawTexture(segment, chapterCompleteTexture, ScaleMode.StretchToFill);
+
+                if (isActive)
+                {
+                    var progress = 1f;
+                    if (video != null && video.IsPrepared && !video.IsStillImage && video.Duration > 0d)
+                        progress = Mathf.Clamp01((float)(video.Time / video.Duration));
+                    GUI.DrawTexture(new Rect(segment.x, segment.y,
+                            Mathf.Max(2f, segment.width * progress), segment.height),
+                        chapterCurrentTexture, ScaleMode.StretchToFill);
+                    thumbX = Mathf.Lerp(segment.x, segment.xMax, progress);
+                }
+
+                // A single one-pixel chapter boundary keeps the bar readable
+                // without the previous thick dark gutter on every segment.
+                if (i > 0)
+                    GUI.DrawTexture(new Rect(segment.x - 0.5f, bar.y, 1f, bar.height),
+                        panelTexture, ScaleMode.StretchToFill);
+                if (segment.width >= 18f) GUI.Label(segment, (i + 1).ToString(), chapterLabelStyle);
+                x += width;
+            }
+
+            var draggingThisPlaylist = playlistSeekDragging
+                                       && playlistSeekDraggingPlaylistIndex == playlistIndex;
+            if (draggingThisPlaylist && playlistSeekPreviewEntryIndex >= 0)
+                thumbX = PlaylistPositionToX(bar, weights, totalWeight,
+                    playlistSeekPreviewEntryIndex, playlistSeekPreviewFraction);
+
+            if (thumbX >= 0f)
+            {
+                var thumbWidth = large ? 12f : 10f;
+                var thumbHeight = large ? 24f : 20f;
+                var thumb = new Rect(thumbX - thumbWidth * 0.5f,
+                    bar.center.y - thumbHeight * 0.5f + 1.5f, thumbWidth, thumbHeight);
+                GUI.Box(thumb, GUIContent.none, sliderThumbStyle);
+            }
+
+            HandlePlaylistSeekInput(playlistIndex, bar, weights, totalWeight);
+
+            if (!activeThisPlaylist || activePlaylistEntryIndex < 0 || activePlaylistEntryIndex >= count)
+            {
+                GUILayout.Label("未再生", smallStyle);
+                return;
+            }
+
+            var currentMaterial = FindMaterial(playlist.materialIds[activePlaylistEntryIndex]);
+            var time = video != null && video.IsPrepared && !video.IsStillImage
+                ? "  " + FormatTime(video.Time) + " / " + FormatTime(video.Duration)
+                : string.Empty;
+            GUILayout.Label((activePlaylistCompleted ? "再生完了 " : "再生中 ")
+                + (activePlaylistEntryIndex + 1) + " / " + count + "  "
+                + TruncateLabel(currentMaterial?.name ?? "素材不明", large ? 76 : 34) + time,
+                smallStyle, GUILayout.Height(20f));
+        }
+
+        private void HandlePlaylistSeekInput(int playlistIndex, Rect bar,
+            float[] weights, float totalWeight)
+        {
+            var current = Event.current;
+            var controlId = GUIUtility.GetControlID(0x51A7 + playlistIndex, FocusType.Passive, bar);
+            var isThisControl = playlistSeekDragging
+                                && playlistSeekDraggingPlaylistIndex == playlistIndex
+                                && GUIUtility.hotControl == controlId;
+
+            if (!playlistSeekDragging && current.type == EventType.MouseDown && current.button == 0
+                && bar.Contains(current.mousePosition))
+            {
+                GUIUtility.hotControl = controlId;
+                playlistSeekDragging = true;
+                playlistSeekDraggingPlaylistIndex = playlistIndex;
+                resumePlaylistAfterSeek = activePlaylistIndex == playlistIndex
+                    ? mediaShouldPlayWhenVisible
+                    : true;
+                mediaShouldPlayWhenVisible = false;
+                if (video != null && video.IsPlaying) video.Pause();
+                nextPlaylistSeekPreviewTime = 0f;
+                lastPlaylistSeekPreviewEntryIndex = -1;
+                lastPlaylistSeekPreviewFraction = -1f;
+                ResolvePlaylistPosition(bar, weights, totalWeight, current.mousePosition.x,
+                    out var entryIndex, out var fraction);
+                UpdatePlaylistSeekTarget(playlistIndex, entryIndex, fraction, false);
+                current.Use();
+                return;
+            }
+
+            if (!isThisControl) return;
+            if (current.type == EventType.MouseDrag)
+            {
+                ResolvePlaylistPosition(bar, weights, totalWeight, current.mousePosition.x,
+                    out var entryIndex, out var fraction);
+                UpdatePlaylistSeekTarget(playlistIndex, entryIndex, fraction, false);
+                current.Use();
+                return;
+            }
+
+            if (current.rawType != EventType.MouseUp) return;
+            ResolvePlaylistPosition(bar, weights, totalWeight, current.mousePosition.x,
+                out var finalEntryIndex, out var finalFraction);
+            UpdatePlaylistSeekTarget(playlistIndex, finalEntryIndex, finalFraction, true);
+            playlistSeekDragging = false;
+            playlistSeekDraggingPlaylistIndex = -1;
+            playlistSeekPreviewEntryIndex = -1;
+            GUIUtility.hotControl = 0;
+            status = "プレイリストの再生位置を移動しました";
+            current.Use();
+        }
+
+        private static void ResolvePlaylistPosition(Rect bar, float[] weights, float totalWeight, float mouseX,
+            out int entryIndex, out float fraction)
+        {
+            var normalizedX = Mathf.Clamp(mouseX, bar.x, bar.xMax);
+            var x = bar.x;
+            entryIndex = Mathf.Max(0, weights.Length - 1);
+            fraction = 1f;
+            for (var i = 0; i < weights.Length; i++)
+            {
+                var width = i == weights.Length - 1
+                    ? bar.xMax - x
+                    : bar.width * weights[i] / Mathf.Max(totalWeight, 0.001f);
+                if (normalizedX <= x + width || i == weights.Length - 1)
+                {
+                    entryIndex = i;
+                    fraction = Mathf.Clamp01(Mathf.InverseLerp(x, x + width, normalizedX));
+                    return;
+                }
+                x += width;
+            }
+        }
+
+        private static float PlaylistPositionToX(Rect bar, float[] weights, float totalWeight,
+            int entryIndex, float fraction)
+        {
+            var x = bar.x;
+            for (var i = 0; i < weights.Length; i++)
+            {
+                var width = i == weights.Length - 1
+                    ? bar.xMax - x
+                    : bar.width * weights[i] / Mathf.Max(totalWeight, 0.001f);
+                if (i == entryIndex) return Mathf.Lerp(x, x + width, Mathf.Clamp01(fraction));
+                x += width;
+            }
+            return bar.xMax;
+        }
+
+        private double PlaylistSeekPreviewTime()
+        {
+            if (playlistSeekDragging && activePlaylistIndex == playlistSeekDraggingPlaylistIndex
+                && activePlaylistEntryIndex == playlistSeekPreviewEntryIndex
+                && video != null && video.IsPrepared && !video.IsStillImage && video.Duration > 0d)
+                return video.Duration * Mathf.Clamp01(playlistSeekPreviewFraction);
+            return video != null ? video.Time : 0d;
+        }
+
+        private void UpdatePlaylistSeekTarget(int playlistIndex, int entryIndex, float fraction, bool final)
+        {
+            if (playlistIndex < 0 || playlistIndex >= playlistCatalog.playlists.Count) return;
+            var playlist = playlistCatalog.playlists[playlistIndex];
+            if (entryIndex < 0 || entryIndex >= playlist.materialIds.Count) return;
+
+            fraction = Mathf.Clamp01(fraction);
+            selectedPlaylistIndex = playlistIndex;
+            selectedPlaylistEntryIndex = entryIndex;
+            activePlaylistCompleted = false;
+            playlistNameField = playlist.name;
+            settings.showIdleScreen = false;
+            playlistSeekPreviewEntryIndex = entryIndex;
+            playlistSeekPreviewFraction = fraction;
+            var materialId = playlist.materialIds[entryIndex];
+
+            if (activePlaylistIndex != playlistIndex || activePlaylistEntryIndex != entryIndex)
+            {
+                activePlaylistIndex = playlistIndex;
+                activePlaylistEntryIndex = entryIndex;
+                pendingPlaylistSeekFraction = fraction;
+                pendingPlaylistSeekMaterialId = materialId;
+                pendingPlaylistSeekShouldPlay = final && resumePlaylistAfterSeek;
+                LoadActivePlaylistEntry();
+                // OpenMedia normally starts a chosen material. During a drag,
+                // however, playback stays paused until pointer release.
+                mediaShouldPlayWhenVisible = final && resumePlaylistAfterSeek;
+                return;
+            }
+
+            if (video == null || !video.IsPrepared)
+            {
+                pendingPlaylistSeekFraction = fraction;
+                pendingPlaylistSeekMaterialId = materialId;
+                pendingPlaylistSeekShouldPlay = final && resumePlaylistAfterSeek;
+                mediaShouldPlayWhenVisible = final && resumePlaylistAfterSeek;
+                return;
+            }
+
+            pendingPlaylistSeekFraction = -1f;
+            pendingPlaylistSeekMaterialId = string.Empty;
+            if (video.IsStillImage || video.Duration <= 0d)
+            {
+                mediaShouldPlayWhenVisible = false;
+                return;
+            }
+
+            var target = video.Duration * fraction;
+            if (final)
+            {
+                mediaShouldPlayWhenVisible = resumePlaylistAfterSeek;
+                video.Seek(target, resumePlaylistAfterSeek);
+                ApplyControlMediaPlaybackState();
+                return;
+            }
+
+            mediaShouldPlayWhenVisible = false;
+            if (Time.unscaledTime < nextPlaylistSeekPreviewTime
+                && lastPlaylistSeekPreviewEntryIndex == entryIndex
+                && Mathf.Abs(lastPlaylistSeekPreviewFraction - fraction) < 0.002f) return;
+            nextPlaylistSeekPreviewTime = Time.unscaledTime + SeekPreviewInterval;
+            lastPlaylistSeekPreviewEntryIndex = entryIndex;
+            lastPlaylistSeekPreviewFraction = fraction;
+            video.SeekPreview(target);
+        }
+
+        private void AddCurrentMaterial()
+        {
+            var mediaPath = (pathField ?? string.Empty).Trim().Trim('"');
+            if (string.IsNullOrWhiteSpace(mediaPath))
+            {
+                status = "登録する動画・画像を先に選択してください";
+                return;
+            }
+
+            var name = (materialNameField ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(name)) name = Path.GetFileNameWithoutExtension(mediaPath);
+            var item = DomeMaterialDefinition.Capture(string.Empty, name,
+                configurationStore.MakePortableMediaPath(mediaPath), settings, CurrentMediaDuration(mediaPath));
+            materialCatalog.materials.Add(item);
+            selectedMaterialIndex = materialCatalog.materials.Count - 1;
+            materialNameField = item.name;
+            SaveMaterialCatalog();
+            status = "素材リストへ追加しました: " + item.name;
+        }
+
+        private void UpdateSelectedMaterial()
+        {
+            if (selectedMaterialIndex < 0 || selectedMaterialIndex >= materialCatalog.materials.Count) return;
+            var previous = materialCatalog.materials[selectedMaterialIndex];
+            var mediaPath = (pathField ?? string.Empty).Trim().Trim('"');
+            if (string.IsNullOrWhiteSpace(mediaPath))
+            {
+                status = "更新する動画・画像を先に選択してください";
+                return;
+            }
+
+            var name = (materialNameField ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(name)) name = previous.name;
+            materialCatalog.materials[selectedMaterialIndex] = DomeMaterialDefinition.Capture(
+                previous.id, name, configurationStore.MakePortableMediaPath(mediaPath), settings,
+                CurrentMediaDuration(mediaPath));
+            materialNameField = name;
+            SaveMaterialCatalog();
+            status = "素材設定を更新しました: " + name;
+        }
+
+        private float CurrentMediaDuration(string path)
+        {
+            return video != null && video.IsPrepared && !video.IsStillImage
+                && MediaPathsEqual(path, video.SourcePath)
+                ? Mathf.Max(0f, (float)video.Duration)
+                : 0f;
+        }
+
+        private void SelectMaterial(int index)
+        {
+            if (materialCatalog.materials.Count == 0)
+            {
+                selectedMaterialIndex = -1;
+                return;
+            }
+
+            selectedMaterialIndex = (index % materialCatalog.materials.Count + materialCatalog.materials.Count)
+                                    % materialCatalog.materials.Count;
+            materialNameField = materialCatalog.materials[selectedMaterialIndex].name;
+            CancelContentDelete();
+        }
+
+        private void LoadMaterial(DomeMaterialDefinition item, bool keepActivePlaylist)
+        {
+            if (item == null) return;
+            if (!keepActivePlaylist)
+            {
+                activePlaylistIndex = -1;
+                activePlaylistEntryIndex = -1;
+                activePlaylistCompleted = false;
+                pendingPlaylistSeekFraction = -1f;
+                pendingPlaylistSeekMaterialId = string.Empty;
+                ResetPlaylistTransition();
+                ClearPlaylistPreload();
+            }
+
+            item.ApplyTo(settings);
+            pathField = configurationStore.ResolveMediaPath(item.path);
+            materialNameField = item.name;
+            OpenMedia(true);
+            status = "素材リストから読込中: " + item.name;
+        }
+
+        private void DeleteSelectedMaterial()
+        {
+            if (selectedMaterialIndex < 0 || selectedMaterialIndex >= materialCatalog.materials.Count) return;
+            var deleted = materialCatalog.materials[selectedMaterialIndex];
+            materialCatalog.materials.RemoveAt(selectedMaterialIndex);
+            foreach (var playlist in playlistCatalog.playlists)
+                playlist.materialIds.RemoveAll(id => string.Equals(id, deleted.id, StringComparison.Ordinal));
+            selectedMaterialIndex = materialCatalog.materials.Count == 0
+                ? -1
+                : Mathf.Clamp(selectedMaterialIndex, 0, materialCatalog.materials.Count - 1);
+            materialNameField = selectedMaterialIndex >= 0
+                ? materialCatalog.materials[selectedMaterialIndex].name
+                : string.Empty;
+            activePlaylistIndex = -1;
+            activePlaylistEntryIndex = -1;
+            activePlaylistCompleted = false;
+            CancelContentDelete();
+            SaveMaterialCatalog();
+            SavePlaylistCatalog();
+            status = "素材リストから削除しました: " + deleted.name;
+        }
+
+        private void AddPlaylist()
+        {
+            var name = (playlistNameField ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                status = "プレイリスト名を入力してください";
+                return;
+            }
+
+            var playlist = new DomePlaylistDefinition
+            {
+                id = Guid.NewGuid().ToString("N"),
+                name = name
+            };
+            playlistCatalog.playlists.Add(playlist);
+            selectedPlaylistIndex = playlistCatalog.playlists.Count - 1;
+            selectedPlaylistEntryIndex = -1;
+            SavePlaylistCatalog();
+            status = "プレイリストを作成しました: " + name;
+        }
+
+        private void RenameSelectedPlaylist()
+        {
+            if (selectedPlaylistIndex < 0 || selectedPlaylistIndex >= playlistCatalog.playlists.Count) return;
+            var name = (playlistNameField ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                status = "プレイリスト名を入力してください";
+                return;
+            }
+
+            playlistCatalog.playlists[selectedPlaylistIndex].name = name;
+            SavePlaylistCatalog();
+            status = "プレイリスト名を更新しました: " + name;
+        }
+
+        private void SelectPlaylist(int index)
+        {
+            if (playlistCatalog.playlists.Count == 0)
+            {
+                selectedPlaylistIndex = -1;
+                return;
+            }
+
+            selectedPlaylistIndex = (index % playlistCatalog.playlists.Count + playlistCatalog.playlists.Count)
+                                    % playlistCatalog.playlists.Count;
+            var playlist = playlistCatalog.playlists[selectedPlaylistIndex];
+            playlistNameField = playlist.name;
+            selectedPlaylistEntryIndex = playlist.materialIds.Count == 0 ? -1 : 0;
+            CancelContentDelete();
+        }
+
+        private void AddSelectedMaterialToPlaylist()
+        {
+            if (selectedPlaylistIndex < 0 || selectedPlaylistIndex >= playlistCatalog.playlists.Count
+                || selectedMaterialIndex < 0 || selectedMaterialIndex >= materialCatalog.materials.Count) return;
+            var playlist = playlistCatalog.playlists[selectedPlaylistIndex];
+            playlist.materialIds.Add(materialCatalog.materials[selectedMaterialIndex].id);
+            selectedPlaylistEntryIndex = playlist.materialIds.Count - 1;
+            SavePlaylistCatalog();
+            status = "プレイリストへ追加しました: " + materialCatalog.materials[selectedMaterialIndex].name;
+        }
+
+        private void MovePlaylistEntry(int direction)
+        {
+            if (selectedPlaylistIndex < 0 || selectedPlaylistIndex >= playlistCatalog.playlists.Count) return;
+            var entries = playlistCatalog.playlists[selectedPlaylistIndex].materialIds;
+            if (selectedPlaylistEntryIndex < 0 || selectedPlaylistEntryIndex >= entries.Count) return;
+            var source = selectedPlaylistEntryIndex;
+            var destination = Mathf.Clamp(source + direction, 0, entries.Count - 1);
+            if (destination == source) return;
+            (entries[source], entries[destination]) = (entries[destination], entries[source]);
+
+            // The transport follows the exact slot that is currently playing.
+            // Without updating this index, reordering either the active row or
+            // the adjacent row makes the central chapter thumb jump to the
+            // wrong material even though the decoder itself has not changed.
+            if (activePlaylistIndex == selectedPlaylistIndex)
+            {
+                if (activePlaylistEntryIndex == source) activePlaylistEntryIndex = destination;
+                else if (activePlaylistEntryIndex == destination) activePlaylistEntryIndex = source;
+                ResetPlaylistTransition();
+                ClearPlaylistPreload();
+            }
+            selectedPlaylistEntryIndex = destination;
+            SavePlaylistCatalog();
+        }
+
+        private void RemovePlaylistEntry()
+        {
+            if (selectedPlaylistIndex < 0 || selectedPlaylistIndex >= playlistCatalog.playlists.Count) return;
+            var entries = playlistCatalog.playlists[selectedPlaylistIndex].materialIds;
+            if (selectedPlaylistEntryIndex < 0 || selectedPlaylistEntryIndex >= entries.Count) return;
+            entries.RemoveAt(selectedPlaylistEntryIndex);
+            selectedPlaylistEntryIndex = entries.Count == 0
+                ? -1
+                : Mathf.Clamp(selectedPlaylistEntryIndex, 0, entries.Count - 1);
+            activePlaylistIndex = -1;
+            activePlaylistEntryIndex = -1;
+            activePlaylistCompleted = false;
+            SavePlaylistCatalog();
+            status = "プレイリストから項目を外しました";
+        }
+
+        private void StartSelectedPlaylist()
+        {
+            if (selectedPlaylistIndex < 0 || selectedPlaylistIndex >= playlistCatalog.playlists.Count) return;
+            var playlist = playlistCatalog.playlists[selectedPlaylistIndex];
+            if (playlist.materialIds.Count == 0)
+            {
+                status = "プレイリストに素材がありません";
+                return;
+            }
+            activePlaylistIndex = selectedPlaylistIndex;
+            activePlaylistEntryIndex = Mathf.Clamp(selectedPlaylistEntryIndex, 0, playlist.materialIds.Count - 1);
+            activePlaylistCompleted = false;
+            pendingPlaylistSeekFraction = -1f;
+            pendingPlaylistSeekMaterialId = string.Empty;
+            ResetPlaylistTransition();
+            ClearPlaylistPreload();
+            LoadActivePlaylistEntry();
+        }
+
+        private void ToggleActivePlaylistPlayback()
+        {
+            if (activePlaylistIndex < 0 || activePlaylistIndex >= playlistCatalog.playlists.Count) return;
+            var playlist = playlistCatalog.playlists[activePlaylistIndex];
+            if (playlist.materialIds.Count == 0) return;
+
+            if (activePlaylistCompleted)
+            {
+                activePlaylistCompleted = false;
+                activePlaylistEntryIndex = 0;
+                selectedPlaylistIndex = activePlaylistIndex;
+                selectedPlaylistEntryIndex = 0;
+                pendingPlaylistSeekFraction = -1f;
+                pendingPlaylistSeekMaterialId = string.Empty;
+                ResetPlaylistTransition();
+                ClearPlaylistPreload();
+                settings.showIdleScreen = false;
+                mediaShouldPlayWhenVisible = true;
+                LoadActivePlaylistEntry();
+                return;
+            }
+
+            if (video != null && video.IsPrepared && !video.IsStillImage && video.Duration > 0d
+                && video.Time >= video.Duration - 0.05d)
+            {
+                settings.showIdleScreen = false;
+                mediaShouldPlayWhenVisible = true;
+                video.Seek(0d, true);
+                return;
+            }
+
+            var effectivelyPlaying = mediaShouldPlayWhenVisible && !settings.showIdleScreen;
+            mediaShouldPlayWhenVisible = !effectivelyPlaying;
+            if (mediaShouldPlayWhenVisible) settings.showIdleScreen = false;
+            ApplyControlMediaPlaybackState();
+        }
+
+        private void UpdatePlaylistTransition()
+        {
+            if (playlistTransitionPhase == 2)
+            {
+                var playlist = activePlaylistIndex >= 0 && activePlaylistIndex < playlistCatalog.playlists.Count
+                    ? playlistCatalog.playlists[activePlaylistIndex]
+                    : null;
+                var halfDuration = Mathf.Max(0.1f, (playlist?.transitionSeconds ?? 0.8f) * 0.5f);
+                playlistTransitionOpacity = Mathf.Clamp01(
+                    (Time.unscaledTime - playlistFadeInStarted) / halfDuration);
+                if (playlistTransitionOpacity >= 1f) ResetPlaylistTransition();
+                return;
+            }
+
+            if (playlistTransitionPhase == 1)
+            {
+                if (activePlaylistIndex < 0 || activePlaylistIndex >= playlistCatalog.playlists.Count
+                    || video == null || !video.IsPrepared || video.IsStillImage || video.Duration <= 0d)
+                {
+                    ResetPlaylistTransition();
+                    return;
+                }
+                var playlist = playlistCatalog.playlists[activePlaylistIndex];
+                var halfDuration = Mathf.Max(0.1f, playlist.transitionSeconds * 0.5f);
+                var remaining = Mathf.Max(0f, (float)(video.Duration - video.Time));
+                playlistTransitionOpacity = Mathf.Clamp01(remaining / halfDuration);
+                if (remaining <= 0.02f)
+                {
+                    playlistTransitionOpacity = 0f;
+                    if (AdvanceActivePlaylist(1))
+                    {
+                        playlistTransitionPhase = 2;
+                        playlistFadeInStarted = Time.unscaledTime;
+                    }
+                    else
+                    {
+                        ResetPlaylistTransition();
+                    }
+                }
+                return;
+            }
+
+            playlistTransitionOpacity = 1f;
+            if (!mediaShouldPlayWhenVisible || activePlaylistIndex < 0
+                || activePlaylistIndex >= playlistCatalog.playlists.Count
+                || video == null || !video.IsPrepared || video.IsStillImage || !video.IsPlaying
+                || video.Duration <= 0d) return;
+            var activePlaylist = playlistCatalog.playlists[activePlaylistIndex];
+            if (!activePlaylist.autoAdvance) return;
+            var nextIndex = GetNextPlaylistEntryIndex(activePlaylist, activePlaylistEntryIndex);
+            if (nextIndex < 0) return;
+            var remainingTime = video.Duration - video.Time;
+            var preloadLeadTime = Mathf.Max(3f, activePlaylist.transitionSeconds + 1f);
+            if (remainingTime <= preloadLeadTime && !IsPlaylistEntryPreloaded(activePlaylist, nextIndex))
+                PrepareNextPlaylistEntry();
+            if (activePlaylist.transitionMode != 1
+                || !IsPlaylistEntryPreloaded(activePlaylist, nextIndex)) return;
+            var fadeOutDuration = Mathf.Max(0.1f, activePlaylist.transitionSeconds * 0.5f);
+            if (remainingTime <= fadeOutDuration)
+                playlistTransitionPhase = 1;
+        }
+
+        private void ResetPlaylistTransition()
+        {
+            playlistTransitionPhase = 0;
+            playlistTransitionOpacity = 1f;
+        }
+
+        private int GetNextPlaylistEntryIndex(DomePlaylistDefinition playlist, int currentIndex)
+        {
+            if (playlist == null || playlist.materialIds.Count == 0) return -1;
+            var next = currentIndex + 1;
+            if (next < playlist.materialIds.Count) return next;
+            return playlist.loop ? 0 : -1;
+        }
+
+        private bool IsPlaylistEntryPreloaded(DomePlaylistDefinition playlist, int entryIndex)
+        {
+            if (playlist == null || entryIndex < 0 || entryIndex >= playlist.materialIds.Count
+                || preloadVideo == null || !preloadVideo.IsPrepared) return false;
+            return string.Equals(preloadedPlaylistMaterialId, playlist.materialIds[entryIndex],
+                StringComparison.Ordinal);
+        }
+
+        private void PrepareNextPlaylistEntry()
+        {
+            if (projectorMode || activePlaylistIndex < 0
+                || activePlaylistIndex >= playlistCatalog.playlists.Count)
+            {
+                ClearPlaylistPreload();
+                return;
+            }
+            var playlist = playlistCatalog.playlists[activePlaylistIndex];
+            if (!playlist.autoAdvance)
+            {
+                ClearPlaylistPreload();
+                return;
+            }
+            var nextIndex = GetNextPlaylistEntryIndex(playlist, activePlaylistEntryIndex);
+            if (nextIndex < 0)
+            {
+                ClearPlaylistPreload();
+                return;
+            }
+            var material = FindMaterial(playlist.materialIds[nextIndex]);
+            if (material == null)
+            {
+                ClearPlaylistPreload();
+                return;
+            }
+            var path = configurationStore.ResolveMediaPath(material.path);
+            if (string.Equals(preloadedPlaylistMaterialId, material.id, StringComparison.Ordinal)
+                && MediaPathsEqual(preloadVideo.SourcePath, path)) return;
+            preloadedPlaylistMaterialId = material.id;
+            preloadVideo.AudioMuted = true;
+            preloadVideo.IsLooping = false;
+            preloadVideo.Open(path);
+        }
+
+        private void ClearPlaylistPreload()
+        {
+            preloadedPlaylistMaterialId = string.Empty;
+            if (preloadVideo != null && (!string.IsNullOrWhiteSpace(preloadVideo.SourcePath)
+                                         || preloadVideo.IsPrepared))
+                preloadVideo.Clear();
+        }
+
+        private bool AdvanceActivePlaylist(int direction)
+        {
+            if (activePlaylistIndex < 0 || activePlaylistIndex >= playlistCatalog.playlists.Count)
+            {
+                if (selectedPlaylistIndex < 0 || selectedPlaylistIndex >= playlistCatalog.playlists.Count)
+                    return false;
+                activePlaylistIndex = selectedPlaylistIndex;
+                activePlaylistEntryIndex = selectedPlaylistEntryIndex < 0 ? 0 : selectedPlaylistEntryIndex;
+                activePlaylistCompleted = false;
+            }
+            else
+            {
+                activePlaylistEntryIndex += direction;
+            }
+
+            var playlist = playlistCatalog.playlists[activePlaylistIndex];
+            if (playlist.materialIds.Count == 0) return false;
+            if (activePlaylistEntryIndex < 0 || activePlaylistEntryIndex >= playlist.materialIds.Count)
+            {
+                if (!playlist.loop)
+                {
+                    // Keep the playlist and its chapters attached to the
+                    // transport after reaching the end. Pressing Play can then
+                    // restart the complete playlist without selecting it again.
+                    if (activePlaylistEntryIndex >= playlist.materialIds.Count)
+                    {
+                        activePlaylistEntryIndex = playlist.materialIds.Count - 1;
+                        selectedPlaylistIndex = activePlaylistIndex;
+                        selectedPlaylistEntryIndex = activePlaylistEntryIndex;
+                        activePlaylistCompleted = true;
+                    }
+                    else
+                    {
+                        activePlaylistEntryIndex = 0;
+                        selectedPlaylistIndex = activePlaylistIndex;
+                        selectedPlaylistEntryIndex = 0;
+                    }
+                    return false;
+                }
+                activePlaylistEntryIndex = activePlaylistEntryIndex < 0
+                    ? playlist.materialIds.Count - 1
+                    : 0;
+            }
+
+            selectedPlaylistIndex = activePlaylistIndex;
+            selectedPlaylistEntryIndex = activePlaylistEntryIndex;
+            activePlaylistCompleted = false;
+            pendingPlaylistSeekFraction = -1f;
+            pendingPlaylistSeekMaterialId = string.Empty;
+            return LoadActivePlaylistEntry();
+        }
+
+        private bool LoadActivePlaylistEntry()
+        {
+            if (activePlaylistIndex < 0 || activePlaylistIndex >= playlistCatalog.playlists.Count) return false;
+            var playlist = playlistCatalog.playlists[activePlaylistIndex];
+            if (activePlaylistEntryIndex < 0 || activePlaylistEntryIndex >= playlist.materialIds.Count) return false;
+            var material = FindMaterial(playlist.materialIds[activePlaylistEntryIndex]);
+            if (material == null)
+            {
+                status = "プレイリスト内の素材IDが見つかりません: "
+                         + playlist.materialIds[activePlaylistEntryIndex];
+                return false;
+            }
+            selectedMaterialIndex = materialCatalog.materials.IndexOf(material);
+            materialNameField = material.name;
+            activePlaylistCompleted = false;
+            if (IsPlaylistEntryPreloaded(playlist, activePlaylistEntryIndex))
+                return ActivatePreloadedPlaylistEntry(material);
+            LoadMaterial(material, true);
+            return true;
+        }
+
+        private bool ActivatePreloadedPlaylistEntry(DomeMaterialDefinition material)
+        {
+            if (material == null || preloadVideo == null || !preloadVideo.IsPrepared) return false;
+            var path = configurationStore.ResolveMediaPath(material.path);
+            if (!MediaPathsEqual(path, preloadVideo.SourcePath)) return false;
+
+            SwapVideoSourceRoles();
+            preloadVideo.Clear();
+            preloadedPlaylistMaterialId = string.Empty;
+            material.ApplyTo(settings);
+            settings.sourceMode = 0;
+            settings.showIdleScreen = false;
+            settings.videoPath = path;
+            pathField = path;
+            mediaSelectedThisSession = true;
+            mediaPreparingForDisplay = false;
+            mediaShouldPlayWhenVisible = true;
+            video.IsLooping = false;
+            video.AudioMuted = settings.audioMuted || ProjectionProcessBridge.IsOutputAlive();
+            if (!video.IsStillImage) video.Play();
+            status = "プレイリスト再生中: " + material.name;
+            SaveSettings();
+            return true;
+        }
+
+        private DomeMaterialDefinition FindMaterial(string id)
+        {
+            return materialCatalog.materials.Find(item =>
+                string.Equals(item.id, id, StringComparison.Ordinal));
+        }
+
+        private void DeleteSelectedPlaylist()
+        {
+            if (selectedPlaylistIndex < 0 || selectedPlaylistIndex >= playlistCatalog.playlists.Count) return;
+            var deleted = playlistCatalog.playlists[selectedPlaylistIndex];
+            playlistCatalog.playlists.RemoveAt(selectedPlaylistIndex);
+            selectedPlaylistIndex = playlistCatalog.playlists.Count == 0
+                ? -1
+                : Mathf.Clamp(selectedPlaylistIndex, 0, playlistCatalog.playlists.Count - 1);
+            selectedPlaylistEntryIndex = -1;
+            playlistNameField = selectedPlaylistIndex >= 0
+                ? playlistCatalog.playlists[selectedPlaylistIndex].name
+                : string.Empty;
+            activePlaylistIndex = -1;
+            activePlaylistEntryIndex = -1;
+            activePlaylistCompleted = false;
+            CancelContentDelete();
+            SavePlaylistCatalog();
+            status = "プレイリストを削除しました: " + deleted.name;
+        }
+
+        private void CancelContentDelete()
+        {
+            pendingContentDeleteKind = string.Empty;
+            pendingContentDeleteId = string.Empty;
+        }
+
+        private void SaveMaterialCatalog()
+        {
+            try
+            {
+                configurationStore.SaveMaterials(materialCatalog);
+            }
+            catch (Exception exception)
+            {
+                status = "materials.jsonの保存エラー: " + exception.Message;
+            }
+        }
+
+        private void SavePlaylistCatalog()
+        {
+            try
+            {
+                configurationStore.SavePlaylists(playlistCatalog);
+            }
+            catch (Exception exception)
+            {
+                status = "playlists.jsonの保存エラー: " + exception.Message;
+            }
         }
 
         private void DrawOutputPanel()
@@ -1942,10 +3835,10 @@ namespace DomeProjection
             GUILayout.Label("素材未選択・動画終了・画面取込終了時に表示します。", smallStyle);
             GUILayout.Label("待機画面の種類（どちらか1つを選択）", smallStyle);
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button((settings.idleDisplayMode == 0 ? "●  " : "○  ") + "黒",
+            if (GUILayout.Button("黒",
                     settings.idleDisplayMode == 0 ? activeTabStyle : tabStyle))
                 settings.idleDisplayMode = 0;
-            if (GUILayout.Button((settings.idleDisplayMode == 1 ? "●  " : "○  ") + "既定画像",
+            if (GUILayout.Button("既定画像",
                     settings.idleDisplayMode == 1 ? activeTabStyle : tabStyle))
                 settings.idleDisplayMode = 1;
             GUILayout.EndHorizontal();
@@ -1963,10 +3856,10 @@ namespace DomeProjection
                 : "保存済み画像: " + Path.GetFileName(idleImagePathField), smallStyle);
             GUILayout.Label("既定画像の表示方法（どちらか1つを選択）", smallStyle);
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button((settings.idleImageIsFlat ? "○  " : "●  ") + "360°画像（半球）",
+            if (GUILayout.Button("360°画像（半球）",
                     settings.idleImageIsFlat ? tabStyle : activeTabStyle))
                 settings.idleImageIsFlat = false;
-            if (GUILayout.Button((settings.idleImageIsFlat ? "●  " : "○  ") + "平面画像",
+            if (GUILayout.Button("平面画像",
                     settings.idleImageIsFlat ? activeTabStyle : tabStyle))
                 settings.idleImageIsFlat = true;
             GUILayout.EndHorizontal();
@@ -1981,16 +3874,16 @@ namespace DomeProjection
             GUILayout.Space(8f);
             GUILayout.Label("半球ガイド（現在の表示内容に重ねる）");
             var guideVisible = settings.gridMode == 1;
-            if (GUILayout.Button(guideVisible ? "●  表示中（押すと非表示）" : "○  非表示（押すと表示）",
+            if (GUILayout.Button(guideVisible ? "半球ガイド：表示中" : "半球ガイド：非表示",
                     guideVisible ? activeTabStyle : tabStyle))
                 ToggleDomeGuide();
             GUILayout.Label("待機画像・動画・画像・外部ウィンドウのどの表示にも重ねられます。", smallStyle);
 
             GUILayout.Space(10f);
             GUILayout.Label("画質");
-            settings.brightness = Slider("明るさ", settings.brightness, 0f, 2f, settings.brightness.ToString("0.00"));
-            settings.gamma = Slider("ガンマ", settings.gamma, 0.4f, 2.5f, settings.gamma.ToString("0.00"));
-            settings.edgeFade = Slider("円周フェード", settings.edgeFade, 0f, 0.2f, settings.edgeFade.ToString("0.000"));
+            settings.brightness = Slider("明るさ", settings.brightness, 0f, 2f, settings.brightness.ToString("0.00"), 1f);
+            settings.gamma = Slider("ガンマ", settings.gamma, 0.4f, 2.5f, settings.gamma.ToString("0.00"), 1f);
+            settings.edgeFade = Slider("円周フェード", settings.edgeFade, 0f, 0.2f, settings.edgeFade.ToString("0.000"), 0f);
 
             GUILayout.BeginHorizontal();
             settings.flipInputX = GUILayout.Toggle(settings.flipInputX, "入力を左右反転");
@@ -2002,8 +3895,10 @@ namespace DomeProjection
             settings.startMaximized = GUILayout.Toggle(settings.startMaximized, "最大化ウィンドウで表示（OSフルスクリーンではありません）");
             GUILayout.BeginHorizontal();
             GUILayout.Label("サイズ", GUILayout.Width(82f));
+            GUI.SetNextControlName(WindowWidthInputName);
             windowWidthField = GUILayout.TextField(windowWidthField, GUILayout.Width(72f));
             GUILayout.Label("×", GUILayout.Width(16f));
+            GUI.SetNextControlName(WindowHeightInputName);
             windowHeightField = GUILayout.TextField(windowHeightField, GUILayout.Width(72f));
             if (GUILayout.Button("適用")) ApplyWindowSettings(false);
             GUILayout.EndHorizontal();
@@ -2126,26 +4021,83 @@ namespace DomeProjection
             UnityEngine.Debug.Log($"Projector output configured at {width} x {height}");
         }
 
-        private float Slider(string label, float value, float min, float max, string display)
+        private float Slider(string label, float value, float min, float max, string display,
+            float? defaultValue = null)
         {
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(label, GUILayout.Width(82f));
-            value = GUILayout.HorizontalSlider(value, min, max, sliderStyle, sliderThumbStyle, GUILayout.ExpandWidth(true));
-            GUILayout.Label(display, GUILayout.Width(72f));
+            GUILayout.BeginHorizontal(GUILayout.Height(28f));
+            GUILayout.Label(label, rowLabelStyle, GUILayout.Width(82f));
+            value = DrawCenteredSlider(ReserveCenteredSliderRect(), value, min, max);
+            GUILayout.Label(display, rowLabelStyle, GUILayout.Width(defaultValue.HasValue ? 54f : 72f));
+            if (defaultValue.HasValue && GUILayout.Button("既定", GUILayout.Width(40f)))
+                value = defaultValue.Value;
             GUILayout.EndHorizontal();
+            return Mathf.Clamp(value, min, max);
+        }
+
+        private float FineSlider(string label, float value, float min, float max, float step, string display,
+            float? defaultValue = null)
+        {
+            GUILayout.BeginHorizontal(GUILayout.Height(28f));
+            GUILayout.Label(label, rowLabelStyle, GUILayout.Width(82f));
+            if (GUILayout.Button("−", GUILayout.Width(24f))) value -= step;
+            value = DrawCenteredSlider(ReserveCenteredSliderRect(defaultValue.HasValue ? 124f : 170f),
+                value, min, max);
+            if (GUILayout.Button("+", GUILayout.Width(24f))) value += step;
+            GUILayout.Label(display, rowLabelStyle, GUILayout.Width(56f));
+            if (defaultValue.HasValue && GUILayout.Button("既定", GUILayout.Width(40f)))
+                value = defaultValue.Value;
+            GUILayout.EndHorizontal();
+            return Mathf.Clamp(value, min, max);
+        }
+
+        private static Rect ReserveCenteredSliderRect(float width = 0f)
+        {
+            var lane = width > 0f
+                ? GUILayoutUtility.GetRect(width, 28f, GUILayout.Width(width), GUILayout.Height(28f))
+                : GUILayoutUtility.GetRect(40f, 28f, GUILayout.ExpandWidth(true), GUILayout.Height(28f));
+            return new Rect(lane.x, lane.y + (lane.height - 18f) * 0.5f, lane.width, 18f);
+        }
+
+        private float DrawCenteredSlider(Rect rect, float value, float min, float max)
+        {
+            var controlId = GUIUtility.GetControlID(0x44D05E, FocusType.Passive, rect);
+            var current = Event.current;
+            if (GUI.enabled)
+            {
+                if (current.type == EventType.MouseDown && current.button == 0
+                    && rect.Contains(current.mousePosition))
+                {
+                    GUIUtility.hotControl = controlId;
+                    value = SliderValueAtMouse(rect, min, max);
+                    current.Use();
+                }
+                else if (current.type == EventType.MouseDrag && GUIUtility.hotControl == controlId)
+                {
+                    value = SliderValueAtMouse(rect, min, max);
+                    current.Use();
+                }
+                else if (current.rawType == EventType.MouseUp && GUIUtility.hotControl == controlId)
+                {
+                    value = SliderValueAtMouse(rect, min, max);
+                    GUIUtility.hotControl = 0;
+                    current.Use();
+                }
+            }
+
+            value = Mathf.Clamp(value, min, max);
+            var track = new Rect(rect.x, rect.center.y - 3f, rect.width, 6f);
+            GUI.Box(track, GUIContent.none, sliderStyle);
+            var normalized = Mathf.InverseLerp(min, max, value);
+            var thumb = new Rect(Mathf.Lerp(rect.x, rect.xMax, normalized) - 6f,
+                rect.center.y - 9f + 1.5f, 12f, 18f);
+            GUI.Box(thumb, GUIContent.none, sliderThumbStyle);
             return value;
         }
 
-        private float FineSlider(string label, float value, float min, float max, float step, string display)
+        private static float SliderValueAtMouse(Rect rect, float min, float max)
         {
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(label, GUILayout.Width(82f));
-            if (GUILayout.Button("−", GUILayout.Width(24f))) value -= step;
-            value = GUILayout.HorizontalSlider(value, min, max, sliderStyle, sliderThumbStyle, GUILayout.Width(170f));
-            if (GUILayout.Button("+", GUILayout.Width(24f))) value += step;
-            GUILayout.Label(display, GUILayout.Width(56f));
-            GUILayout.EndHorizontal();
-            return Mathf.Clamp(value, min, max);
+            return Mathf.Lerp(min, max,
+                Mathf.Clamp01(Mathf.InverseLerp(rect.x, rect.xMax, Event.current.mousePosition.x)));
         }
 
         private static float NextGridStep(float current)
@@ -2168,6 +4120,10 @@ namespace DomeProjection
                 }
             }
             if (current.type != EventType.KeyDown) return;
+            // IMGUI sends the same key event to OnGUI and the focused TextField.
+            // Never consume text-editing keys as app shortcuts: without this,
+            // typing e.g. "test1" switches to tab 1 before '1' reaches the field.
+            if (textInputFocused || IsTextInputFocused()) return;
             switch (current.keyCode)
             {
                 case KeyCode.Space:
@@ -2256,7 +4212,22 @@ namespace DomeProjection
                     activePanelTab = 3;
                     current.Use();
                     break;
+                case KeyCode.Alpha5:
+                    activePanelTab = 4;
+                    current.Use();
+                    break;
             }
+        }
+
+        private static bool IsTextInputFocused()
+        {
+            var focused = GUI.GetNameOfFocusedControl();
+            return focused == MediaPathInputName
+                   || focused == LensProfileInputName
+                   || focused == MaterialNameInputName
+                   || focused == PlaylistNameInputName
+                   || focused == WindowWidthInputName
+                   || focused == WindowHeightInputName;
         }
 
         private void QuitApplication()
@@ -2269,21 +4240,99 @@ namespace DomeProjection
 #endif
         }
 
+        private void BeginSection(string title)
+        {
+            GUILayout.BeginVertical(sectionStyle);
+            if (!string.IsNullOrWhiteSpace(title)) GUILayout.Label(title, sectionTitleStyle);
+        }
+
+        private static void EndSection()
+        {
+            GUILayout.EndVertical();
+            GUILayout.Space(6f);
+        }
+
         private void BuildStyles()
         {
             if (titleStyle != null) return;
 
             panelTexture = CreateSolidTexture(new Color(0.105f, 0.115f, 0.13f, 1f));
-            tabTexture = CreateSolidTexture(new Color(0.16f, 0.18f, 0.21f, 1f));
-            activeTabTexture = CreateSolidTexture(new Color(0.12f, 0.47f, 0.72f, 1f));
-            tabContentTexture = CreateSolidTexture(new Color(0.22f, 0.235f, 0.26f, 1f));
-            dropdownRowTexture = CreateSolidTexture(new Color(0.16f, 0.18f, 0.21f, 1f));
-            dropdownSelectedRowTexture = CreateSolidTexture(new Color(0.12f, 0.39f, 0.59f, 1f));
+            buttonTexture = CreateBorderedTexture(new Color(0.22f, 0.24f, 0.27f, 1f),
+                new Color(0.38f, 0.41f, 0.45f, 1f));
+            buttonHoverTexture = CreateBorderedTexture(new Color(0.28f, 0.31f, 0.35f, 1f),
+                new Color(0.50f, 0.55f, 0.60f, 1f));
+            buttonPressedTexture = CreateBorderedTexture(new Color(0.12f, 0.47f, 0.72f, 1f),
+                new Color(0.40f, 0.76f, 0.96f, 1f));
+            inputTexture = CreateBorderedTexture(new Color(0.075f, 0.085f, 0.10f, 1f),
+                new Color(0.34f, 0.37f, 0.42f, 1f));
+            inputFocusedTexture = CreateBorderedTexture(new Color(0.10f, 0.13f, 0.16f, 1f),
+                new Color(0.28f, 0.67f, 0.92f, 1f));
+            tabTexture = CreateBorderedTexture(new Color(0.16f, 0.18f, 0.21f, 1f),
+                new Color(0.34f, 0.37f, 0.42f, 1f));
+            activeTabTexture = CreateBorderedTexture(new Color(0.12f, 0.47f, 0.72f, 1f),
+                new Color(0.42f, 0.78f, 0.98f, 1f));
+            tabContentTexture = CreateBorderedTexture(new Color(0.22f, 0.235f, 0.26f, 1f),
+                new Color(0.36f, 0.39f, 0.44f, 1f));
+            dropdownRowTexture = CreateBorderedTexture(new Color(0.16f, 0.18f, 0.21f, 1f),
+                new Color(0.32f, 0.35f, 0.39f, 1f));
+            dropdownSelectedRowTexture = CreateBorderedTexture(new Color(0.12f, 0.39f, 0.59f, 1f),
+                new Color(0.37f, 0.72f, 0.93f, 1f));
+            playingRowTexture = CreateBorderedTexture(new Color(0.10f, 0.43f, 0.36f, 1f),
+                new Color(0.40f, 0.90f, 0.72f, 1f));
             scrollbarTexture = CreateSolidTexture(new Color(0.16f, 0.18f, 0.2f, 1f));
             scrollbarThumbTexture = CreateSolidTexture(new Color(0.38f, 0.62f, 0.76f, 1f));
-            sliderTexture = CreateSolidTexture(new Color(0.38f, 0.41f, 0.45f, 1f));
-            sliderThumbTexture = CreateSolidTexture(new Color(0.25f, 0.67f, 0.95f, 1f));
-            sliderThumbActiveTexture = CreateSolidTexture(new Color(0.55f, 0.84f, 1f, 1f));
+            sliderTexture = CreateBorderedTexture(new Color(0.30f, 0.33f, 0.37f, 1f),
+                new Color(0.52f, 0.56f, 0.61f, 1f));
+            sliderThumbTexture = CreateBorderedTexture(new Color(0.25f, 0.67f, 0.95f, 1f),
+                new Color(0.58f, 0.86f, 1f, 1f));
+            sliderThumbActiveTexture = CreateBorderedTexture(new Color(0.55f, 0.84f, 1f, 1f),
+                Color.white);
+            sectionTexture = CreateBorderedTexture(new Color(0.175f, 0.19f, 0.215f, 1f),
+                new Color(0.37f, 0.40f, 0.45f, 1f));
+            chapterPendingTexture = CreateSolidTexture(new Color(0.29f, 0.31f, 0.34f, 1f));
+            chapterCompleteTexture = CreateSolidTexture(new Color(0.13f, 0.40f, 0.59f, 1f));
+            chapterCurrentTexture = CreateSolidTexture(new Color(0.28f, 0.72f, 1f, 1f));
+
+            var button = GUI.skin.button;
+            button.normal.background = buttonTexture;
+            button.hover.background = buttonHoverTexture;
+            button.active.background = buttonPressedTexture;
+            button.focused.background = buttonHoverTexture;
+            button.onNormal.background = buttonPressedTexture;
+            button.onHover.background = activeTabTexture;
+            button.onActive.background = activeTabTexture;
+            button.onFocused.background = activeTabTexture;
+            button.border = new RectOffset(1, 1, 1, 1);
+            button.margin = new RectOffset(2, 2, 2, 2);
+            button.padding = new RectOffset(8, 8, 5, 5);
+            button.fixedHeight = 28f;
+
+            var toggle = GUI.skin.toggle;
+            toggle.normal.background = buttonTexture;
+            toggle.hover.background = buttonHoverTexture;
+            toggle.active.background = buttonPressedTexture;
+            toggle.focused.background = buttonHoverTexture;
+            toggle.onNormal.background = buttonPressedTexture;
+            toggle.onHover.background = activeTabTexture;
+            toggle.onActive.background = activeTabTexture;
+            toggle.onFocused.background = activeTabTexture;
+            toggle.border = new RectOffset(1, 1, 1, 1);
+            toggle.margin = new RectOffset(2, 2, 2, 2);
+            toggle.padding = new RectOffset(8, 8, 5, 5);
+            toggle.alignment = TextAnchor.MiddleCenter;
+            toggle.fixedHeight = 28f;
+
+            GUI.skin.box.normal.background = tabTexture;
+            GUI.skin.box.border = new RectOffset(1, 1, 1, 1);
+
+            var textField = GUI.skin.textField;
+            textField.normal.background = inputTexture;
+            textField.hover.background = inputFocusedTexture;
+            textField.focused.background = inputFocusedTexture;
+            textField.active.background = inputFocusedTexture;
+            textField.border = new RectOffset(1, 1, 1, 1);
+            textField.padding = new RectOffset(8, 8, 5, 5);
+            textField.fixedHeight = 28f;
 
             panelStyle = new GUIStyle(GUI.skin.box)
             {
@@ -2291,11 +4340,26 @@ namespace DomeProjection
             };
             panelStyle.normal.background = panelTexture;
 
+            sectionStyle = new GUIStyle(GUI.skin.box)
+            {
+                padding = new RectOffset(9, 9, 7, 9),
+                margin = new RectOffset(0, 0, 0, 0),
+                border = new RectOffset(1, 1, 1, 1)
+            };
+            sectionStyle.normal.background = sectionTexture;
+            sectionTitleStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 12,
+                fontStyle = FontStyle.Bold,
+                margin = new RectOffset(2, 2, 0, 4)
+            };
+
             tabStyle = new GUIStyle(GUI.skin.button)
             {
                 alignment = TextAnchor.MiddleCenter,
                 fontSize = 12,
                 fontStyle = FontStyle.Normal,
+                fixedHeight = 0f,
                 padding = new RectOffset(5, 5, 6, 5),
                 margin = new RectOffset(1, 1, 0, 0)
             };
@@ -2307,6 +4371,18 @@ namespace DomeProjection
             activeTabStyle.hover.background = activeTabTexture;
             activeTabStyle.active.background = activeTabTexture;
 
+            selectedListButtonStyle = new GUIStyle(activeTabStyle)
+            {
+                alignment = TextAnchor.MiddleLeft,
+                fontStyle = FontStyle.Bold,
+                fixedHeight = 0f,
+                padding = new RectOffset(10, 8, 4, 4)
+            };
+            playingListButtonStyle = new GUIStyle(selectedListButtonStyle);
+            playingListButtonStyle.normal.background = playingRowTexture;
+            playingListButtonStyle.hover.background = playingRowTexture;
+            playingListButtonStyle.active.background = playingRowTexture;
+
             tabContentStyle = new GUIStyle(GUI.skin.box)
             {
                 padding = new RectOffset(10, 10, 10, 12),
@@ -2317,6 +4393,7 @@ namespace DomeProjection
             dropdownButtonStyle = new GUIStyle(GUI.skin.button)
             {
                 alignment = TextAnchor.MiddleLeft,
+                fixedHeight = 0f,
                 padding = new RectOffset(10, 8, 4, 4)
             };
             dropdownRowStyle = new GUIStyle(GUI.skin.box)
@@ -2333,24 +4410,37 @@ namespace DomeProjection
                 clipping = TextClipping.Clip
             };
 
-            GUI.skin.verticalScrollbar.fixedWidth = 10f;
+            const float scrollbarWidth = 12f;
+            GUI.skin.verticalScrollbar.fixedWidth = scrollbarWidth;
+            GUI.skin.verticalScrollbar.margin = new RectOffset(8, 0, 0, 0);
+            GUI.skin.verticalScrollbar.padding = new RectOffset(0, 0, 0, 0);
+            GUI.skin.verticalScrollbar.border = new RectOffset(0, 0, 0, 0);
             GUI.skin.verticalScrollbar.normal.background = scrollbarTexture;
             GUI.skin.verticalScrollbar.hover.background = scrollbarTexture;
             GUI.skin.verticalScrollbar.active.background = scrollbarTexture;
+            GUI.skin.verticalScrollbarThumb.fixedWidth = scrollbarWidth;
+            GUI.skin.verticalScrollbarThumb.margin = new RectOffset(0, 0, 0, 0);
+            GUI.skin.verticalScrollbarThumb.padding = new RectOffset(0, 0, 0, 0);
+            GUI.skin.verticalScrollbarThumb.border = new RectOffset(0, 0, 0, 0);
+            GUI.skin.verticalScrollbarThumb.overflow = new RectOffset(0, 0, 0, 0);
             GUI.skin.verticalScrollbarThumb.normal.background = scrollbarThumbTexture;
             GUI.skin.verticalScrollbarThumb.hover.background = sliderThumbActiveTexture;
             GUI.skin.verticalScrollbarThumb.active.background = sliderThumbActiveTexture;
+            ConfigureScrollbarButton(GUI.skin.verticalScrollbarUpButton, scrollbarWidth);
+            ConfigureScrollbarButton(GUI.skin.verticalScrollbarDownButton, scrollbarWidth);
 
             sliderStyle = new GUIStyle(GUI.skin.horizontalSlider)
             {
-                fixedHeight = 8f
+                fixedHeight = 8f,
+                border = new RectOffset(1, 1, 1, 1)
             };
             sliderStyle.normal.background = sliderTexture;
 
             sliderThumbStyle = new GUIStyle(GUI.skin.horizontalSliderThumb)
             {
                 fixedWidth = 12f,
-                fixedHeight = 18f
+                fixedHeight = 18f,
+                border = new RectOffset(1, 1, 1, 1)
             };
             sliderThumbStyle.normal.background = sliderThumbTexture;
             sliderThumbStyle.hover.background = sliderThumbActiveTexture;
@@ -2358,6 +4448,30 @@ namespace DomeProjection
 
             titleStyle = new GUIStyle(GUI.skin.label) { fontSize = 20, fontStyle = FontStyle.Bold };
             smallStyle = new GUIStyle(GUI.skin.label) { fontSize = 11, wordWrap = true };
+            rowLabelStyle = new GUIStyle(GUI.skin.label)
+            {
+                alignment = TextAnchor.MiddleLeft,
+                fixedHeight = 28f
+            };
+            chapterLabelStyle = new GUIStyle(GUI.skin.label)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontSize = 10,
+                fontStyle = FontStyle.Bold,
+                clipping = TextClipping.Clip
+            };
+        }
+
+        private void ConfigureScrollbarButton(GUIStyle style, float width)
+        {
+            style.fixedWidth = width;
+            style.margin = new RectOffset(0, 0, 0, 0);
+            style.padding = new RectOffset(0, 0, 0, 0);
+            style.border = new RectOffset(0, 0, 0, 0);
+            style.overflow = new RectOffset(0, 0, 0, 0);
+            style.normal.background = scrollbarTexture;
+            style.hover.background = scrollbarThumbTexture;
+            style.active.background = sliderThumbActiveTexture;
         }
 
         private static Texture2D CreateSolidTexture(Color color)
@@ -2367,6 +4481,21 @@ namespace DomeProjection
                 hideFlags = HideFlags.HideAndDontSave
             };
             texture.SetPixel(0, 0, color);
+            texture.Apply();
+            return texture;
+        }
+
+        private static Texture2D CreateBorderedTexture(Color fill, Color border)
+        {
+            var texture = new Texture2D(3, 3, TextureFormat.RGBA32, false)
+            {
+                hideFlags = HideFlags.HideAndDontSave,
+                filterMode = FilterMode.Point,
+                wrapMode = TextureWrapMode.Clamp
+            };
+            for (var y = 0; y < 3; y++)
+            for (var x = 0; x < 3; x++)
+                texture.SetPixel(x, y, x == 0 || x == 2 || y == 0 || y == 2 ? border : fill);
             texture.Apply();
             return texture;
         }

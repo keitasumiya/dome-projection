@@ -24,7 +24,7 @@ open Builds/DomeProjectionControl.app --args --window "PowerPoint"
 
 ## 現在の機能
 
-- Unity標準 `VideoPlayer` によるローカル動画再生
+- AVPro Video 2.9.3によるローカル動画再生（待機画像にはUnity標準 `VideoPlayer` を使用）
 - シークバーのドラッグ表示をデコード処理から分離し、確定後も音声付きで再生を継続
 - 動画音声の再生とミュート切替（Output投影中はControl側の音声を自動停止）
 - JPEG / PNGの360°画像表示
@@ -43,11 +43,17 @@ open Builds/DomeProjectionControl.app --args --window "PowerPoint"
 - 上・下・左・右を独立調整する方向別補正（複数レンズや偏心配置向け）
 - 明るさ、ガンマ、円周フェード
 - 1°・2°・5°・10°・15°から選べる校正グリッド（15°ごとに強調）
-- スクロール不要の「配置／校正／レンズ／投影」タブUI
+- 「配置／校正／レンズ／出力／素材一覧」タブUI
+- 操作パネル全体のホイール／トラックパッドスクロール、左右配置、三本線ボタンでの再表示
+- 枠線と背景色で区切った操作グループ、上下中央に揃えたスライダー行
+- 素材とプレイリスト内容を左揃えの縦一覧で表示し、連続シークバーをクリック／ドラッグして素材・再生位置を移動
+- 動画・プレイリスト再生中はControl画面の左右中央・下部に大きなシークバーを表示
+- プレイリスト終端の数秒だけ次素材を事前読込し、カット／黒フェード（時間調整）で切替
+- 黒フェード時は映像と音声を同時にフェード
 - 天頂向きを初期表示し、Pitchを±180°で調整
 - 通常起動はOSフルスクリーンではない最大化ウィンドウ
 - ウィンドウの手動リサイズ、幅・高さ入力、解像度プリセット
-- 低い画面解像度では操作UIを自動縮小（スクロールバーなし）
+- 低い画面解像度では操作UIを自動縮小し、パネル全体を縦スクロール
 - 操作専用Controlアプリと、UIを持たない投影専用Outputアプリ
 - ControlからOutputをワンクリックで起動・終了
 - 設定、素材、再生・一時停止、再生位置をlocalhost限定UDPで2アプリ間同期（30 / 60 / 120Hz切替）
@@ -58,7 +64,8 @@ open Builds/DomeProjectionControl.app --args --window "PowerPoint"
 - アプリの二重起動防止
 - Editor、macOS、Windowsビルドでのファイル選択
 
-設定はControlとOutputの共通Application Supportフォルダー内にJSONで保存されます。
+通常設定はControlとOutputの共通Application Supportフォルダー内にJSONで保存されます。
+素材、プレイリスト、レンズ設定は、直接編集しやすい外部の `DomeProjectionConfig` フォルダーへ保存されます。
 旧macOS版で日本語部分が`?`として保存された素材パスは復元できないため、最新版では自動消去されます。一度だけ素材を選び直してください。
 
 ## キー操作
@@ -72,11 +79,41 @@ open Builds/DomeProjectionControl.app --args --window "PowerPoint"
 | F | 全画面切替 |
 | R | 幾何補正を初期化 |
 | Esc | 全画面表示を解除（ウィンドウ表示中は何もしない） |
-| 1 / 2 / 3 / 4 | 配置／校正／レンズ／投影タブ |
+| 1 / 2 / 3 / 4 / 5 | 配置／校正／レンズ／出力／素材一覧タブ |
 | ← / →、PageUp / PageDown | 取込中ウィンドウへ前／次の操作を送信 |
 | T | 取込中ウィンドウを前面にして、通常のマウス・キーボード操作へ切替 |
 
 設定UIを隠している間は、左クリックで次へ、右クリックで前へ進めます。
+
+## 素材リスト・プレイリスト・レンズ設定
+
+「素材一覧」タブで、現在選択している動画・画像と、その表示形式・向き・全天円形補正・平面配置を
+素材として登録できます。登録済み素材を並べてプレイリストを作り、順番変更、前後移動、末尾からの
+ループ再生もできます。動画終了時の自動切替はプレイリストごとにON/OFFでき、初期値はONです。
+区切り付きシークバーをクリックすると、指定した素材の指定位置から再生します。静止画は「次へ」で進めます。
+
+設定フォルダーは、編集できない場合がある `StreamingAssets` ではなく、ビルドの外側に置きます。
+
+- Unity Editor: プロジェクト直下の `DomeProjectionConfig/`
+- macOSビルド: `DomeProjectionControl.app` / `DomeProjectionOutput.app` と同じフォルダーの `DomeProjectionConfig/`
+- Windowsビルド: `Control/` / `Output/` と同じ親フォルダーの `DomeProjectionConfig/`
+
+中には次のファイルを自動生成します。
+
+```text
+DomeProjectionConfig/
+├── materials.json
+├── playlists.json
+├── README.txt
+└── Lenses/
+    └── （保存したレンズ設定）.json
+```
+
+`materials.json` と `playlists.json` はUTF-8のJSONなので、VS Codeなどで直接編集できます。
+アプリ起動時に自動読込し、起動中は「素材一覧」タブの「JSONを再読込」で反映します。
+素材の `path` は絶対パスのほか、`DomeProjectionConfig` を基準にした相対パスも使用できます。
+プレイリストの `materialIds` には `materials.json` の素材 `id` を再生順に記述します。
+形式の概要は同じフォルダーに生成される `README.txt` にも記載されます。
 
 ## PowerPoint・PDF・外部ウィンドウ
 
@@ -174,9 +211,9 @@ H.264 MP4へ変換してください。5.3K以上の動画はGPUのデコード�
 
 ## AVPro Videoについて
 
-現状はAVPro Videoに依存しません。`IVideoSource` と標準実装 `UnityVideoSource` を分離しているため、5.7K/8K動画の性能やシーク精度に問題が出た場合、購入済みのAVPro Video 2.9.3を別実装として追加できます。
-
-AVPro Video 2.xはDeprecatedのため、最初からプロジェクトへインポートしないでください。まず標準VideoPlayerで実機性能を測定します。
+動画再生にはAVPro Video 2.9.3を使用しています。ドラッグ中は軽量なプレビューシーク、
+ドラッグ終了時は正確なシークへ切り替え、標準VideoPlayerより滑らかに映像を追従させます。
+描画側は `IVideoSource` を介しているため、待機用静止画などは引き続きUnity標準実装を使用します。
 
 ## FC-E8到着後の校正
 

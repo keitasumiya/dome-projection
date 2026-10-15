@@ -13,8 +13,11 @@ namespace DomeProjection
         public long sequence;
         public DomeProjectionSettings settings;
         public bool mediaIsPlaying;
+        public bool mediaIsLooping;
         public bool mediaIsScrubbing;
         public double mediaTime;
+        public string preloadMediaPath;
+        public float transitionOpacity = 1f;
     }
 
     /// <summary>

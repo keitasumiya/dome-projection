@@ -32,11 +32,13 @@ namespace DomeProjection
         private static readonly int FlatCrop = Shader.PropertyToID("_FlatCrop");
         private static readonly int CircularSource = Shader.PropertyToID("_CircularSource");
         private static readonly int CircularRadial = Shader.PropertyToID("_CircularRadial");
+        private static readonly int ContentOpacityId = Shader.PropertyToID("_ContentOpacity");
 
         private Material material;
         private Camera outputCamera;
 
         public DomeProjectionSettings Settings { get; set; }
+        public float ContentOpacity { get; set; } = 1f;
         public IVideoSource VideoSource { get; set; }
         public IVideoSource IdleImageSource { get; set; }
         public IVideoSource WindowBackgroundImageSource { get; set; }
@@ -138,6 +140,7 @@ namespace DomeProjection
             material.SetVector(FlatSize, new Vector4(Settings.flatHeightScale, 0f, 0f, 0f));
             material.SetVector(FlatCrop, new Vector4(Settings.flatCropLeft, Settings.flatCropRight,
                 Settings.flatCropBottom, Settings.flatCropTop));
+            material.SetFloat(ContentOpacityId, Mathf.Clamp01(ContentOpacity));
 
             Graphics.Blit(source, destination, material, 0);
         }

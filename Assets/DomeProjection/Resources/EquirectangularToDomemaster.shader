@@ -48,6 +48,7 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
             float4 _FlatCrop;
             float4 _CircularSource;
             float2 _CircularRadial;
+            float _ContentOpacity;
 
             static const float PI = 3.14159265358979323846;
 
@@ -241,7 +242,7 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
                 else if (_GridMode > 0.5) color = lerp(color, grid, saturate(gridAmount * _GridSettings.y));
 
                 float mask = _EdgeFade > 0.0001 ? 1.0 - smoothstep(1.0 - _EdgeFade, 1.0, outputRadius) : 1.0;
-                return fixed4(saturate(color) * mask, 1.0);
+                return fixed4(saturate(color) * mask * saturate(_ContentOpacity), 1.0);
             }
             ENDCG
         }
