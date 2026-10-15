@@ -6,14 +6,25 @@ namespace DomeProjection
     [Serializable]
     public sealed class DomeProjectionSettings
     {
-        public int settingsVersion = 14;
+        public int settingsVersion = 16;
         public string videoPath = string.Empty;
 
         // Input source. 0 = video/image file, 1 = captured desktop window.
         public int sourceMode;
-        // Files can be interpreted as 360 equirectangular or as a flat panel.
-        // Captured windows always use the flat projection.
+        // Legacy compatibility flag. fileProjectionMode is authoritative.
         public bool fileIsFlat;
+        // File projection: 0 = 2:1 equirectangular, 1 = flat panel,
+        // 2 = circular all-sky/fisheye/domemaster passed directly to the dome.
+        public int fileProjectionMode;
+        // Circular source placement inside the source frame. Radius 1 fills
+        // the shorter image dimension while preserving a true pixel circle.
+        public float allSkySourceCenterX = 0.5f;
+        public float allSkySourceCenterY = 0.5f;
+        public float allSkySourceRadius = 1f;
+        public float allSkySourceRotation;
+        // Input-lens radial correction, separate from projector-lens K1-K3.
+        public float allSkySourceRadialK1;
+        public float allSkySourceRadialK2;
         public string capturedWindowOwner = string.Empty;
         public string capturedWindowTitle = string.Empty;
         // Native window handle/CGWindowID. Control and Output are separate
@@ -114,7 +125,16 @@ namespace DomeProjection
             yaw = roll = 0f;
             pitch = 180f;
             domeFov = 180f;
+            ResetAllSkyPlacement();
             ResetOutputCircle();
+        }
+
+        public void ResetAllSkyPlacement()
+        {
+            allSkySourceCenterX = allSkySourceCenterY = 0.5f;
+            allSkySourceRadius = 1f;
+            allSkySourceRotation = 0f;
+            allSkySourceRadialK1 = allSkySourceRadialK2 = 0f;
         }
 
         public void ResetOutputCircle()
@@ -259,7 +279,23 @@ namespace DomeProjection
                 startMaximized = true;
             }
 
-            settingsVersion = 14;
+            if (settingsVersion < 15)
+            {
+                // Preserve the old two-way 360/flat choice while introducing
+                // circular all-sky media as an explicit third projection.
+                fileProjectionMode = fileIsFlat ? 1 : 0;
+                ResetAllSkyPlacement();
+            }
+
+            if (settingsVersion < 16)
+            {
+                // New source-lens controls default to an unchanged circular
+                // image, including settings already saved by v15.
+                allSkySourceRotation = 0f;
+                allSkySourceRadialK1 = allSkySourceRadialK2 = 0f;
+            }
+
+            settingsVersion = 16;
         }
 
         public void Clamp()
@@ -294,6 +330,14 @@ namespace DomeProjection
             windowHeight = Mathf.Clamp(windowHeight, 450, 4320);
             outputDisplay = Mathf.Max(0, outputDisplay);
             sourceMode = Mathf.Clamp(sourceMode, 0, 1);
+            fileProjectionMode = Mathf.Clamp(fileProjectionMode, 0, 2);
+            fileIsFlat = fileProjectionMode == 1;
+            allSkySourceCenterX = Mathf.Clamp01(allSkySourceCenterX);
+            allSkySourceCenterY = Mathf.Clamp01(allSkySourceCenterY);
+            allSkySourceRadius = Mathf.Clamp(allSkySourceRadius, 0.1f, 1.5f);
+            allSkySourceRotation = Mathf.Repeat(allSkySourceRotation + 180f, 360f) - 180f;
+            allSkySourceRadialK1 = Mathf.Clamp(allSkySourceRadialK1, -0.5f, 0.5f);
+            allSkySourceRadialK2 = Mathf.Clamp(allSkySourceRadialK2, -0.5f, 0.5f);
             windowCaptureFps = Mathf.Clamp(windowCaptureFps, 5, 60);
             flatAzimuth = Mathf.Repeat(flatAzimuth + 180f, 360f) - 180f;
             flatPolarAngle = Mathf.Clamp(flatPolarAngle, 0f, 89f);

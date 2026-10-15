@@ -30,6 +30,8 @@ namespace DomeProjection
         private static readonly int FlatPlacement = Shader.PropertyToID("_FlatPlacement");
         private static readonly int FlatSize = Shader.PropertyToID("_FlatSize");
         private static readonly int FlatCrop = Shader.PropertyToID("_FlatCrop");
+        private static readonly int CircularSource = Shader.PropertyToID("_CircularSource");
+        private static readonly int CircularRadial = Shader.PropertyToID("_CircularRadial");
 
         private Material material;
         private Camera outputCamera;
@@ -85,8 +87,10 @@ namespace DomeProjection
             var sourceHeight = usePrimary
                 ? useWindow ? WindowSource?.Height ?? 0 : VideoSource?.Height ?? 0
                 : useIdleImage ? IdleImageSource.Height : 0;
-            var flatContent = usePrimary ? useWindow || Settings.fileIsFlat
-                : useIdleImage && Settings.idleImageIsFlat;
+            var contentMode = usePrimary
+                ? useWindow ? 1 : Settings.fileProjectionMode
+                : useIdleImage && Settings.idleImageIsFlat ? 1 : 0;
+            var flatContent = contentMode == 1;
             var useWindowBackground = usePrimary && useWindow
                 && WindowBackgroundImageSource?.Texture != null
                 && WindowBackgroundImageSource.IsPrepared;
@@ -122,8 +126,13 @@ namespace DomeProjection
             material.SetFloat(GridMode, Settings.gridMode);
             material.SetVector(GridSettings, new Vector4(Settings.gridStepDegrees, Settings.gridOpacity, 15f, Settings.showOrientationMarkers ? 1f : 0f));
             material.SetVector(GridAppearance, new Vector4(Settings.gridLineWidth, 0f, 0f, 0f));
-            material.SetFloat(ContentMode, flatContent ? 1f : 0f);
+            material.SetFloat(ContentMode, contentMode);
             material.SetFloat(SourceAspect, sourceHeight > 0 ? (float)sourceWidth / sourceHeight : 16f / 9f);
+            material.SetVector(CircularSource, new Vector4(Settings.allSkySourceCenterX,
+                Settings.allSkySourceCenterY, Settings.allSkySourceRadius,
+                Settings.allSkySourceRotation));
+            material.SetVector(CircularRadial, new Vector4(Settings.allSkySourceRadialK1,
+                Settings.allSkySourceRadialK2, 0f, 0f));
             material.SetVector(FlatPlacement, new Vector4(Settings.flatAzimuth, Settings.flatPolarAngle,
                 Settings.flatRoll, Settings.flatHorizontalFov));
             material.SetVector(FlatSize, new Vector4(Settings.flatHeightScale, 0f, 0f, 0f));

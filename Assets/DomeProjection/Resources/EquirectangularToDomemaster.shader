@@ -46,6 +46,8 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
             float4 _FlatPlacement;
             float4 _FlatSize;
             float4 _FlatCrop;
+            float4 _CircularSource;
+            float2 _CircularRadial;
 
             static const float PI = 3.14159265358979323846;
 
@@ -157,7 +159,31 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
                 if (_InputFlip.y > 0.5) backgroundUV.y = 1.0 - backgroundUV.y;
                 float2 videoUV;
                 float contentMask = 1.0;
-                if (_ContentMode > 0.5)
+                if (_ContentMode > 1.5)
+                {
+                    // The source is already an azimuthal/equidistant all-sky
+                    // circle. Map the calibrated output circle directly into
+                    // the largest true pixel circle in the source frame.
+                    float sourceAspect = max(_SourceAspect, 0.0001);
+                    float2 sourceRadius = sourceAspect >= 1.0
+                        ? float2(0.5 / sourceAspect, 0.5)
+                        : float2(0.5, 0.5 * sourceAspect);
+                    float sourceRotation = radians(_CircularSource.w);
+                    float sourceCos = cos(sourceRotation);
+                    float sourceSin = sin(sourceRotation);
+                    float2 sourcePoint = float2(
+                        sourceCos * lensPoint.x - sourceSin * lensPoint.y,
+                        sourceSin * lensPoint.x + sourceCos * lensPoint.y);
+                    float sourceR2 = dot(sourcePoint, sourcePoint);
+                    sourcePoint *= 1.0 + _CircularRadial.x * sourceR2
+                        + _CircularRadial.y * sourceR2 * sourceR2;
+                    videoUV = _CircularSource.xy
+                        + sourcePoint * sourceRadius * _CircularSource.z;
+                    contentMask = step(length(sourcePoint), 1.0)
+                        * step(0.0, videoUV.x) * step(videoUV.x, 1.0)
+                        * step(0.0, videoUV.y) * step(videoUV.y, 1.0);
+                }
+                else if (_ContentMode > 0.5)
                 {
                     float azimuthCenter = radians(_FlatPlacement.x);
                     float polarCenter = radians(_FlatPlacement.y);

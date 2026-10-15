@@ -424,8 +424,8 @@ namespace DomeProjection
             if (video.Height > 0)
             {
                 var aspect = (double)video.Width / video.Height;
-                if (!settings.fileIsFlat && Math.Abs(aspect - 2d) > 0.03d)
-                    status += "  ⚠ 2:1のEquirectangular素材ではありません";
+                if (settings.fileProjectionMode == 0 && Math.Abs(aspect - 2d) > 0.03d)
+                    status += "  ⚠ 2:1ではありません。全天円形または平面を選択してください";
             }
 
             if (settings.gridMode == 2) settings.gridMode = 0;
@@ -664,7 +664,7 @@ namespace DomeProjection
             var selected = string.Empty;
 
 #if UNITY_EDITOR
-            selected = EditorUtility.OpenFilePanelWithFilters("360°動画・画像を選択", string.Empty,
+            selected = EditorUtility.OpenFilePanelWithFilters("投影する動画・画像を選択", string.Empty,
                 new[] { "動画・画像", "mp4,mov,m4v,jpg,jpeg,png", "すべてのファイル", "*" });
 #elif UNITY_STANDALONE_OSX
             selected = OpenMacMediaFilePanel(out var macDialogError);
@@ -922,12 +922,12 @@ namespace DomeProjection
                 {
                     structSize = (uint)Marshal.SizeOf<WindowsOpenFileName>(),
                     owner = GetActiveWindow(),
-                    filter = "360°動画・画像 (*.mp4;*.mov;*.m4v;*.jpg;*.jpeg;*.png)\0*.mp4;*.mov;*.m4v;*.jpg;*.jpeg;*.png\0すべてのファイル (*.*)\0*.*\0\0",
+                    filter = "投影する動画・画像 (*.mp4;*.mov;*.m4v;*.jpg;*.jpeg;*.png)\0*.mp4;*.mov;*.m4v;*.jpg;*.jpeg;*.png\0すべてのファイル (*.*)\0*.*\0\0",
                     filterIndex = 1,
                     file = fileBuffer,
                     maxFile = fileBufferCharacters,
                     initialDirectory = GetExistingMediaDirectory(),
-                    title = "360°動画・画像を選択",
+                    title = "投影する動画・画像を選択",
                     flags = WindowsDialogExplorer | WindowsDialogFileMustExist
                         | WindowsDialogPathMustExist | WindowsDialogNoChangeDirectory,
                     defaultExtension = "mp4"
@@ -1421,14 +1421,20 @@ namespace DomeProjection
 
         private void DrawMediaControls()
         {
-            GUILayout.Label("360°動画・画像（2:1 Equirectangular）");
+            GUILayout.Label("動画・画像");
             GUILayout.BeginHorizontal();
             pathField = GUILayout.TextField(pathField, GUILayout.Width(VideoPathWidth));
             if (GUILayout.Button("選択", GUILayout.Width(54f))) BrowseMedia();
             if (GUILayout.Button("読込", GUILayout.Width(54f))) OpenMedia();
             GUILayout.EndHorizontal();
-            settings.fileIsFlat = GUILayout.Toggle(settings.fileIsFlat,
-                "平面資料として表示（通常の画像・スライド動画）");
+            GUILayout.Label("素材の形式（どれか1つ）", smallStyle);
+            GUILayout.BeginHorizontal();
+            DrawFileProjectionModeButton(0, "360° 2:1");
+            DrawFileProjectionModeButton(2, "全天円形");
+            DrawFileProjectionModeButton(1, "平面");
+            GUILayout.EndHorizontal();
+            if (settings.fileProjectionMode == 2)
+                GUILayout.Label("POMS全天画像・魚眼・ドームマスターを円形のまま投影します。", smallStyle);
 
             if (video.IsStillImage)
             {
@@ -1458,6 +1464,15 @@ namespace DomeProjection
 
             if (video.IsPrepared && video.Duration > 0d)
                 DrawMediaSeekBar();
+        }
+
+        private void DrawFileProjectionModeButton(int mode, string label)
+        {
+            var selected = settings.fileProjectionMode == mode;
+            if (!GUILayout.Button((selected ? "●  " : "○  ") + label,
+                    selected ? activeTabStyle : tabStyle, GUILayout.ExpandWidth(true))) return;
+            settings.fileProjectionMode = mode;
+            settings.fileIsFlat = mode == 1;
         }
 
         private void ToggleDomeGuide()
@@ -1804,6 +1819,7 @@ namespace DomeProjection
         private void DrawBasicPanel()
         {
             if (IsFlatContent()) DrawFlatPlacementControls();
+            else if (IsAllSkyCircularContent()) DrawAllSkyPlacementControls();
             else
             {
                 GUILayout.Label("表示方向");
@@ -1846,7 +1862,32 @@ namespace DomeProjection
 
         private bool IsFlatContent()
         {
-            return settings.sourceMode == 1 || settings.fileIsFlat;
+            return settings.sourceMode == 1 || settings.fileProjectionMode == 1;
+        }
+
+        private bool IsAllSkyCircularContent()
+        {
+            return settings.sourceMode == 0 && settings.fileProjectionMode == 2;
+        }
+
+        private void DrawAllSkyPlacementControls()
+        {
+            GUILayout.Label("全天円形素材の位置合わせ");
+            GUILayout.Label("素材内の円だけを調整します。投影円の位置・大きさは「校正」タブの出力円で調整します。", smallStyle);
+            settings.allSkySourceCenterX = FineSlider("素材中心 X", settings.allSkySourceCenterX,
+                0f, 1f, 0.001f, settings.allSkySourceCenterX.ToString("0.000"));
+            settings.allSkySourceCenterY = FineSlider("素材中心 Y", settings.allSkySourceCenterY,
+                0f, 1f, 0.001f, settings.allSkySourceCenterY.ToString("0.000"));
+            settings.allSkySourceRadius = FineSlider("素材円半径", settings.allSkySourceRadius,
+                0.1f, 1.5f, 0.005f, settings.allSkySourceRadius.ToString("0.000"));
+            settings.allSkySourceRotation = FineSlider("素材回転", settings.allSkySourceRotation,
+                -180f, 180f, 0.5f, settings.allSkySourceRotation.ToString("0.0°"));
+            GUILayout.Label("入力魚眼の補正（投影レンズのK1–K3とは別です）", smallStyle);
+            settings.allSkySourceRadialK1 = FineSlider("入力 K1", settings.allSkySourceRadialK1,
+                -0.3f, 0.3f, 0.001f, settings.allSkySourceRadialK1.ToString("0.000"));
+            settings.allSkySourceRadialK2 = FineSlider("入力 K2", settings.allSkySourceRadialK2,
+                -0.3f, 0.3f, 0.001f, settings.allSkySourceRadialK2.ToString("0.000"));
+            if (GUILayout.Button("全天円形素材の位置をリセット")) settings.ResetAllSkyPlacement();
         }
 
         private void DrawFlatPlacementControls()
