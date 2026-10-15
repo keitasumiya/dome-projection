@@ -893,6 +893,7 @@ namespace DomeProjection
         {
             var sent = forward ? windowCapture.SendNext() : windowCapture.SendPrevious();
             if (!sent) status = "スライド操作を送信できませんでした。取込対象を確認してください。";
+            else status = forward ? "スライドを次へ進めました" : "スライドを前へ戻しました";
         }
 
 #if UNITY_STANDALONE_WIN
@@ -1094,6 +1095,13 @@ namespace DomeProjection
             lastAppliedBridgeSequence = shared.sequence;
             bridgeWantsMediaPlayback = shared.mediaIsPlaying;
             ApplySharedSettings(shared.settings);
+
+            // Output captures the selected window independently from Control.
+            // Changing sourceMode previously hid that texture but left
+            // PrintWindow running in the background, competing with AVPro's
+            // decoder and causing Windows-only video stalls/black flashes.
+            if (settings.sourceMode == 0 && windowCapture.SelectedWindow != null)
+                windowCapture.StopCapture();
 
             if (settings.sourceMode == 0 && string.IsNullOrWhiteSpace(settings.videoPath)
                 && (video.IsPrepared || !string.IsNullOrEmpty(video.SourcePath)))
