@@ -31,6 +31,8 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
             float2 _Ellipse;
             float3 _Orientation;
             float _DomeFov;
+            float _ProjectionRegionMode;
+            float4 _OffAxisProjection;
             float _OutputRotation;
             float3 _Radial;
             float2 _Tangential;
@@ -81,7 +83,7 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
                 return 1.0 - smoothstep(width, width * 2.0, distanceToLine);
             }
 
-            float3 CalibrationGrid(float outputRadius, float azimuth, float angleDegrees)
+            float3 CalibrationGrid(float outputRadius, float domeRadius, float azimuth, float angleDegrees)
             {
                 float minorStep = max(_GridSettings.x, 1.0);
                 float majorStep = max(_GridSettings.z, minorStep);
@@ -99,11 +101,11 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
 
                 // Suppress the densest minor spokes around the pole while keeping
                 // the 15-degree major axes visible all the way to the center.
-                minorSpokes *= smoothstep(0.07, 0.16, outputRadius);
+                minorSpokes *= smoothstep(0.07, 0.16, domeRadius);
                 float minorGrid = saturate(max(minorRings, minorSpokes));
                 float majorGrid = saturate(max(majorRings, majorSpokes));
                 float outer = 1.0 - smoothstep(0.006, 0.016, abs(outputRadius - 1.0));
-                float center = 1.0 - smoothstep(0.0, 0.025, outputRadius);
+                float center = 1.0 - smoothstep(0.0, 0.025, domeRadius);
 
                 float3 grid = float3(0.025, 0.12, 0.19) * minorGrid;
                 grid = max(grid, float3(0.08, 0.46, 0.72) * majorGrid);
@@ -112,7 +114,7 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
 
                 // Colored orientation marks just inside the horizon:
                 // North red, East green, South blue, West yellow.
-                float markerRadius = 1.0 - smoothstep(0.035, 0.06, abs(outputRadius - 0.90));
+                float markerRadius = 1.0 - smoothstep(0.035, 0.06, abs(domeRadius - 0.90));
                 float north = 1.0 - smoothstep(0.025, 0.055, abs(sin(azimuth * 0.5)));
                 float east = 1.0 - smoothstep(0.025, 0.055, abs(sin((azimuth - PI * 0.5) * 0.5)));
                 float south = 1.0 - smoothstep(0.025, 0.055, abs(sin((azimuth - PI) * 0.5)));
@@ -153,6 +155,51 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
                 float azimuth = atan2(lensPoint.x, lensPoint.y);
                 float sinTheta = sin(theta);
                 float3 direction = float3(sinTheta * sin(azimuth), cos(theta), sinTheta * cos(azimuth));
+                float domeAzimuth = azimuth;
+                float domePolarDegrees = degrees(theta);
+                // Normalized physical polar distance: 1 is the horizon, 2 is
+                // the south pole. This keeps grid landmarks meaningful when
+                // centre projection is widened beyond 180 degrees.
+                float domeRadius = domePolarDegrees / 90.0;
+
+                if (_ProjectionRegionMode > 0.5)
+                {
+                    // Projector P sits near the rear rim and looks toward +Z.
+                    // The fisheye ray is tilted upward, then intersected with
+                    // the unit dome. Projector-image Y becomes physical height.
+                    float aim = radians(_OffAxisProjection.z);
+                    float aimCos = cos(aim);
+                    float aimSin = sin(aim);
+                    float3 opticalRay = float3(sinTheta * sin(azimuth),
+                        sinTheta * cos(azimuth), cos(theta));
+                    float3 ray = float3(opticalRay.x,
+                        aimCos * opticalRay.y + aimSin * opticalRay.z,
+                        -aimSin * opticalRay.y + aimCos * opticalRay.z);
+                    ray = normalize(ray);
+                    float3 projectorPosition = float3(0.0,
+                        _OffAxisProjection.y, -_OffAxisProjection.x);
+                    float projected = dot(projectorPosition, ray);
+                    float discriminant = projected * projected
+                        - (dot(projectorPosition, projectorPosition) - 1.0);
+                    if (discriminant < 0.0) return fixed4(0, 0, 0, 1);
+                    float root = sqrt(discriminant);
+                    // The projector can sit slightly outside the dome radius.
+                    // In that case the near root is the unwanted near-side
+                    // sphere surface; projection is intended for the opposite,
+                    // inner-facing dome surface, so always use the far root.
+                    float hitDistance = -projected + root;
+                    if (hitDistance <= 0.0001) return fixed4(0, 0, 0, 1);
+                    direction = normalize(projectorPosition + ray * hitDistance);
+                    // Optionally retain a small area below the nominal horizon.
+                    // -20 degrees matches the lower extent of a 220-degree
+                    // zenith-centred projection.
+                    float minimumHeight = sin(radians(_OffAxisProjection.w));
+                    if (direction.y < minimumHeight) return fixed4(0, 0, 0, 1);
+                    domeAzimuth = atan2(direction.x, direction.z);
+                    domePolarDegrees = degrees(acos(clamp(direction.y, -1.0, 1.0)));
+                    domeRadius = domePolarDegrees / 90.0;
+                }
+
                 float3 backgroundDirection = RotateDirection(direction, _Orientation);
                 float2 backgroundUV = float2(frac(atan2(backgroundDirection.x, backgroundDirection.z) / (2.0 * PI) + 0.5),
                                              0.5 - asin(clamp(backgroundDirection.y, -1.0, 1.0)) / PI);
@@ -172,9 +219,12 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
                     float sourceRotation = radians(_CircularSource.w);
                     float sourceCos = cos(sourceRotation);
                     float sourceSin = sin(sourceRotation);
+                    float2 domePoint = _ProjectionRegionMode > 0.5
+                        ? float2(sin(domeAzimuth), cos(domeAzimuth)) * domeRadius
+                        : lensPoint;
                     float2 sourcePoint = float2(
-                        sourceCos * lensPoint.x - sourceSin * lensPoint.y,
-                        sourceSin * lensPoint.x + sourceCos * lensPoint.y);
+                        sourceCos * domePoint.x - sourceSin * domePoint.y,
+                        sourceSin * domePoint.x + sourceCos * domePoint.y);
                     float sourceR2 = dot(sourcePoint, sourcePoint);
                     sourcePoint *= 1.0 + _CircularRadial.x * sourceR2
                         + _CircularRadial.y * sourceR2 * sourceR2;
@@ -235,7 +285,8 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
                 }
                 videoColor = pow(max(videoColor * _ColorAdjust.x, 0.0), 1.0 / max(_ColorAdjust.y, 0.001));
 
-                float3 grid = CalibrationGrid(outputRadius, azimuth, degrees(theta));
+                float3 grid = CalibrationGrid(outputRadius, domeRadius,
+                    domeAzimuth, domePolarDegrees);
                 float gridAmount = max(grid.r, max(grid.g, grid.b));
                 float3 color = videoColor;
                 if (_GridMode > 1.5) color = float3(0.008, 0.012, 0.02) + grid;

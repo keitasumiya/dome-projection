@@ -6,7 +6,7 @@ namespace DomeProjection
     [Serializable]
     public sealed class LensCalibrationProfile
     {
-        public int profileVersion = 1;
+        public int profileVersion = 5;
         public string displayName = string.Empty;
         public string savedUtc = string.Empty;
 
@@ -14,6 +14,11 @@ namespace DomeProjection
         // the projector, conversion lens, and their physical alignment. Source
         // orientation, media paths, brightness, and playback state stay intact.
         public float domeFov = 180f;
+        public int projectionRegionMode;
+        public float offAxisProjectorDistance = 0.95f;
+        public float offAxisProjectorHeight;
+        public float offAxisAimElevation = 15f;
+        public float offAxisMinimumElevation = -20f;
         public float centerX = 0.5f;
         public float centerY = 0.5f;
         public float radius = 0.485f;
@@ -37,6 +42,11 @@ namespace DomeProjection
                 displayName = name,
                 savedUtc = DateTime.UtcNow.ToString("O"),
                 domeFov = settings.domeFov,
+                projectionRegionMode = settings.projectionRegionMode,
+                offAxisProjectorDistance = settings.offAxisProjectorDistance,
+                offAxisProjectorHeight = settings.offAxisProjectorHeight,
+                offAxisAimElevation = settings.offAxisAimElevation,
+                offAxisMinimumElevation = settings.offAxisMinimumElevation,
                 centerX = settings.centerX,
                 centerY = settings.centerY,
                 radius = settings.radius,
@@ -58,6 +68,11 @@ namespace DomeProjection
         public void ApplyTo(DomeProjectionSettings settings)
         {
             settings.domeFov = domeFov;
+            settings.projectionRegionMode = projectionRegionMode;
+            settings.offAxisProjectorDistance = offAxisProjectorDistance;
+            settings.offAxisProjectorHeight = offAxisProjectorHeight;
+            settings.offAxisAimElevation = offAxisAimElevation;
+            settings.offAxisMinimumElevation = offAxisMinimumElevation;
             settings.centerX = centerX;
             settings.centerY = centerY;
             settings.radius = radius;
@@ -73,6 +88,19 @@ namespace DomeProjection
             settings.warpBottom = warpBottom;
             settings.warpLeft = warpLeft;
             settings.warpRight = warpRight;
+            if (projectionRegionMode == 1 && profileVersion < 4)
+            {
+                // Profiles saved by the temporary semicircle implementation do
+                // not contain a physical projector position. Give them the new
+                // rim-projector defaults instead of interpreting zeros.
+                settings.domeFov = 120f;
+                settings.offAxisProjectorDistance = 0.95f;
+                settings.offAxisProjectorHeight = 0f;
+                settings.offAxisAimElevation = 15f;
+                if (settings.radius < 0.75f) settings.radius = 1f;
+            }
+            if (projectionRegionMode == 1 && profileVersion < 5)
+                settings.offAxisMinimumElevation = -20f;
             settings.Clamp();
         }
     }
@@ -80,7 +108,7 @@ namespace DomeProjection
     [Serializable]
     public sealed class DomeProjectionSettings
     {
-        public int settingsVersion = 17;
+        public int settingsVersion = 21;
         public string videoPath = string.Empty;
 
         // Input source. 0 = video/image file, 1 = captured desktop window.
@@ -136,7 +164,21 @@ namespace DomeProjection
         public float yaw;
         public float pitch = 180f;
         public float roll;
+        // Projection geometry. 0 = projector at the sphere centre; 1 = an
+        // off-axis projector near the rear rim, aimed across the dome. In the
+        // latter mode each projector ray is intersected with the unit sphere,
+        // so the visible area is not forcibly clipped to an exact quarter.
+        public int projectionRegionMode;
         public float domeFov = 180f;
+        // Off-axis position is expressed in dome-radius units. The default is
+        // just inside the rear rim at (0, height, -distance).
+        public float offAxisProjectorDistance = 0.95f;
+        public float offAxisProjectorHeight;
+        public float offAxisAimElevation = 15f;
+        // Lowest sphere elevation retained by the off-axis renderer. A value
+        // of -20 degrees corresponds to the lower extent of a 220-degree
+        // zenith-centred projection.
+        public float offAxisMinimumElevation = -20f;
 
         // Output circle. Center is in normalized output coordinates; radius is
         // relative to output height, so 0.5 gives a height-filling circle.
@@ -201,6 +243,7 @@ namespace DomeProjection
         {
             yaw = roll = 0f;
             pitch = 180f;
+            projectionRegionMode = 0;
             domeFov = 180f;
             ResetAllSkyPlacement();
             ResetOutputCircle();
@@ -218,6 +261,22 @@ namespace DomeProjection
         {
             centerX = centerY = 0.5f;
             radius = 0.485f;
+            ellipseX = ellipseY = 1f;
+            outputRotation = 0f;
+        }
+
+        public void ResetOffAxisProjection()
+        {
+            domeFov = 120f;
+            offAxisProjectorDistance = 0.95f;
+            offAxisProjectorHeight = 0f;
+            offAxisAimElevation = 15f;
+            offAxisMinimumElevation = -20f;
+            centerX = centerY = 0.5f;
+            // In this geometry only a cropped portion of the conversion-lens
+            // circle is normally useful, so start with a radius equal to the
+            // complete short side rather than half of it.
+            radius = 1f;
             ellipseX = ellipseY = 1f;
             outputRotation = 0f;
         }
@@ -377,7 +436,31 @@ namespace DomeProjection
                 controlPanelOnRight = false;
             }
 
-            settingsVersion = 17;
+            if (settingsVersion < 18)
+            {
+                // Existing installations keep their previous complete-dome
+                // behavior. The quarter-sphere mode is selected explicitly.
+                projectionRegionMode = 0;
+            }
+
+            if (settingsVersion < 19 && projectionRegionMode == 1)
+            {
+                // Version 18 briefly defined this mode as a 120-degree circular
+                // cap. Replace it with the intended 180 x 90-degree half dome.
+                domeFov = 180f;
+            }
+
+            if (settingsVersion < 20 && projectionRegionMode == 1)
+            {
+                // Version 19 used a centre-of-sphere semicircle mask. Migrate
+                // it to the physical rim-projector model and its useful crop.
+                ResetOffAxisProjection();
+            }
+
+            if (settingsVersion < 21)
+                offAxisMinimumElevation = -20f;
+
+            settingsVersion = 21;
         }
 
         public void Clamp()
@@ -385,12 +468,19 @@ namespace DomeProjection
             yaw = Mathf.Repeat(yaw + 180f, 360f) - 180f;
             pitch = Mathf.Clamp(pitch, -180f, 180f);
             roll = Mathf.Clamp(roll, -180f, 180f);
-            domeFov = Mathf.Clamp(domeFov, 90f, 220f);
-            centerX = Mathf.Clamp01(centerX);
-            centerY = Mathf.Clamp01(centerY);
-            radius = Mathf.Clamp(radius, 0.05f, 1f);
-            ellipseX = Mathf.Clamp(ellipseX, 0.25f, 2f);
-            ellipseY = Mathf.Clamp(ellipseY, 0.25f, 2f);
+            projectionRegionMode = Mathf.Clamp(projectionRegionMode, 0, 1);
+            domeFov = Mathf.Clamp(domeFov, 30f, 360f);
+            offAxisProjectorDistance = Mathf.Clamp(offAxisProjectorDistance, 0f, 2f);
+            offAxisProjectorHeight = Mathf.Clamp(offAxisProjectorHeight, -1.5f, 1.5f);
+            offAxisAimElevation = Mathf.Clamp(offAxisAimElevation, -90f, 90f);
+            offAxisMinimumElevation = Mathf.Clamp(offAxisMinimumElevation, -90f, 0f);
+            // Oversized and off-screen circles are useful when only the front
+            // portion of the physical dome is used as a large window.
+            centerX = Mathf.Clamp(centerX, -1f, 2f);
+            centerY = Mathf.Clamp(centerY, -1f, 2f);
+            radius = Mathf.Clamp(radius, 0.05f, 3f);
+            ellipseX = Mathf.Clamp(ellipseX, 0.1f, 3f);
+            ellipseY = Mathf.Clamp(ellipseY, 0.1f, 3f);
             outputRotation = Mathf.Repeat(outputRotation + 180f, 360f) - 180f;
             radialK1 = Mathf.Clamp(radialK1, -0.5f, 0.5f);
             radialK2 = Mathf.Clamp(radialK2, -0.5f, 0.5f);

@@ -2296,6 +2296,8 @@ namespace DomeProjection
 
         private void DrawBasicPanel()
         {
+            DrawProjectionRegionControls();
+
             if (IsFlatContent()) DrawFlatPlacementControls();
             else if (IsAllSkyCircularContent()) DrawAllSkyPlacementControls();
             else
@@ -2304,10 +2306,64 @@ namespace DomeProjection
                 settings.yaw = Slider("Yaw", settings.yaw, -180f, 180f, settings.yaw.ToString("0.0°"), 0f);
                 settings.pitch = Slider("Pitch", settings.pitch, -180f, 180f, settings.pitch.ToString("0.0°"), 180f);
                 settings.roll = Slider("Roll", settings.roll, -180f, 180f, settings.roll.ToString("0.0°"), 0f);
-                settings.domeFov = FineSlider("ドーム画角", settings.domeFov, 90f, 220f, 1f, settings.domeFov.ToString("0°"), 180f);
                 EndSection();
             }
 
+        }
+
+        private void DrawProjectionRegionControls()
+        {
+            BeginSection("投影範囲");
+            GUILayout.BeginHorizontal();
+            DrawProjectionRegionModeButton(0, "中心設置・半球全体");
+            DrawProjectionRegionModeButton(1, "端置き・前方投影");
+            GUILayout.EndHorizontal();
+
+            var offAxis = settings.projectionRegionMode == 1;
+            GUILayout.Label(offAxis
+                ? "プロジェクターをドーム端付近に置く想定です。各光線と球面の交点を計算し、上半球に当たる範囲を可能な限り表示します。"
+                : "プロジェクターを球の中心に置く通常の半球投影です。", smallStyle);
+            if (offAxis)
+            {
+                settings.domeFov = FineSlider("レンズ投影角", settings.domeFov,
+                    30f, 360f, 1f, settings.domeFov.ToString("0°"), 120f);
+                settings.offAxisProjectorDistance = FineSlider("中心→設置位置",
+                    settings.offAxisProjectorDistance, 0f, 2f, 0.01f,
+                    settings.offAxisProjectorDistance.ToString("0.00 R"), 0.95f);
+                settings.offAxisProjectorHeight = FineSlider("設置高さ",
+                    settings.offAxisProjectorHeight, -1.5f, 1.5f, 0.01f,
+                    settings.offAxisProjectorHeight.ToString("0.00 R"), 0f);
+                settings.offAxisAimElevation = FineSlider("光軸の仰角",
+                    settings.offAxisAimElevation, -90f, 90f, 0.5f,
+                    settings.offAxisAimElevation.ToString("0.0°"), 15f);
+                settings.offAxisMinimumElevation = FineSlider("下端の仰角",
+                    settings.offAxisMinimumElevation, -90f, 0f, 1f,
+                    settings.offAxisMinimumElevation.ToString("0°"), -20f);
+                GUILayout.Label("Rはドーム半径です。半円へ固定せず、設定した下端仰角以上の球面交点を可能な限り表示します。", smallStyle);
+                if (GUILayout.Button("端置き投影を既定へ")) settings.ResetOffAxisProjection();
+            }
+            else
+            {
+                settings.domeFov = FineSlider("ドーム画角", settings.domeFov,
+                    30f, 360f, 1f, settings.domeFov.ToString("0°"), 180f);
+                GUILayout.Label("360°で素材上は北極から南極まで球全体を扱います。実際の到達範囲はレンズと設置条件に依存します。", smallStyle);
+            }
+            EndSection();
+        }
+
+        private void DrawProjectionRegionModeButton(int mode, string label)
+        {
+            var selected = settings.projectionRegionMode == mode;
+            if (!GUILayout.Button(label,
+                    selected ? activeTabStyle : tabStyle, GUILayout.ExpandWidth(true))) return;
+            if (settings.projectionRegionMode == mode) return;
+            settings.projectionRegionMode = mode;
+            if (mode == 1) settings.ResetOffAxisProjection();
+            else
+            {
+                settings.domeFov = 180f;
+                settings.ResetOutputCircle();
+            }
         }
 
         private void DrawCalibrationPanel()
@@ -2333,13 +2389,18 @@ namespace DomeProjection
             EndSection();
 
             BeginSection("出力円");
-            settings.centerX = FineSlider("中心 X", settings.centerX, 0.25f, 0.75f, 0.001f, settings.centerX.ToString("0.000"), 0.5f);
-            settings.centerY = FineSlider("中心 Y", settings.centerY, 0.25f, 0.75f, 0.001f, settings.centerY.ToString("0.000"), 0.5f);
-            settings.radius = FineSlider("円半径", settings.radius, 0.2f, 0.7f, 0.001f, settings.radius.ToString("0.000"), 0.485f);
-            settings.ellipseX = FineSlider("横倍率", settings.ellipseX, 0.75f, 1.25f, 0.001f, settings.ellipseX.ToString("0.000"), 1f);
-            settings.ellipseY = FineSlider("縦倍率", settings.ellipseY, 0.75f, 1.25f, 0.001f, settings.ellipseY.ToString("0.000"), 1f);
+            GUILayout.Label("画面外へはみ出す位置・大きさまで調整できます。", smallStyle);
+            settings.centerX = FineSlider("中心 X", settings.centerX, -1f, 2f, 0.001f, settings.centerX.ToString("0.000"), 0.5f);
+            settings.centerY = FineSlider("中心 Y", settings.centerY, -1f, 2f, 0.001f, settings.centerY.ToString("0.000"), 0.5f);
+            settings.radius = FineSlider("円半径", settings.radius, 0.05f, 3f, 0.001f, settings.radius.ToString("0.000"), 0.485f);
+            settings.ellipseX = FineSlider("横倍率", settings.ellipseX, 0.1f, 3f, 0.001f, settings.ellipseX.ToString("0.000"), 1f);
+            settings.ellipseY = FineSlider("縦倍率", settings.ellipseY, 0.1f, 3f, 0.001f, settings.ellipseY.ToString("0.000"), 1f);
             settings.outputRotation = FineSlider("出力回転", settings.outputRotation, -180f, 180f, 0.1f, settings.outputRotation.ToString("0.0°"), 0f);
-            if (GUILayout.Button("出力円をリセット")) settings.ResetOutputCircle();
+            if (GUILayout.Button("出力円をリセット"))
+            {
+                settings.ResetOutputCircle();
+                if (settings.projectionRegionMode == 1) settings.radius = 1f;
+            }
             EndSection();
         }
 
@@ -2443,6 +2504,7 @@ namespace DomeProjection
             if (GUILayout.Button("歪み補正をすべて0へ")) settings.ResetLensCalibration();
             if (GUILayout.Button("出力円も含め全て初期値へ"))
             {
+                settings.projectionRegionMode = 0;
                 settings.domeFov = 180f;
                 settings.ResetOutputCircle();
                 settings.ResetLensCalibration();
@@ -2456,7 +2518,7 @@ namespace DomeProjection
         private void DrawLensProfileControls()
         {
             BeginSection("レンズ設定の保存／読込");
-            GUILayout.Label("出力円・ドーム画角・K1～K3・P1/P2・方向別補正をまとめて保存します。素材の向きや再生設定は変わりません。", smallStyle);
+            GUILayout.Label("投影方式・プロジェクター位置・出力円・画角・K1～K3・P1/P2・方向別補正をまとめて保存します。素材の向きや再生設定は変わりません。", smallStyle);
 
             GUILayout.BeginHorizontal();
             GUILayout.Label("保存名", GUILayout.Width(58f));

@@ -15,6 +15,8 @@ namespace DomeProjection
         private static readonly int Ellipse = Shader.PropertyToID("_Ellipse");
         private static readonly int Orientation = Shader.PropertyToID("_Orientation");
         private static readonly int DomeFov = Shader.PropertyToID("_DomeFov");
+        private static readonly int ProjectionRegionMode = Shader.PropertyToID("_ProjectionRegionMode");
+        private static readonly int OffAxisProjection = Shader.PropertyToID("_OffAxisProjection");
         private static readonly int OutputRotation = Shader.PropertyToID("_OutputRotation");
         private static readonly int Radial = Shader.PropertyToID("_Radial");
         private static readonly int Tangential = Shader.PropertyToID("_Tangential");
@@ -118,6 +120,10 @@ namespace DomeProjection
             material.SetVector(Ellipse, new Vector4(Settings.ellipseX, Settings.ellipseY, 0f, 0f));
             material.SetVector(Orientation, new Vector4(Settings.yaw, Settings.pitch, Settings.roll, 0f));
             material.SetFloat(DomeFov, Settings.domeFov);
+            material.SetFloat(ProjectionRegionMode, Settings.projectionRegionMode);
+            material.SetVector(OffAxisProjection, new Vector4(Settings.offAxisProjectorDistance,
+                Settings.offAxisProjectorHeight, Settings.offAxisAimElevation,
+                Settings.offAxisMinimumElevation));
             material.SetFloat(OutputRotation, Settings.outputRotation);
             material.SetVector(Radial, new Vector4(Settings.radialK1, Settings.radialK2, Settings.radialK3, 0f));
             material.SetVector(Tangential, new Vector4(Settings.tangentialP1, Settings.tangentialP2, 0f, 0f));
