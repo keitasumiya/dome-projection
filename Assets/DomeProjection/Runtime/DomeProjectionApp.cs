@@ -178,6 +178,32 @@ namespace DomeProjection
         private int playlistTransitionPhase;
         private float playlistTransitionOpacity = 1f;
         private float playlistFadeInStarted;
+        private bool roomWarpEditing;
+        // Session-only Control inspection view. It intentionally never changes
+        // the projector/output process, and returns to the output view at launch.
+        private float controlPreviewScale = 1f;
+        private float controlPreviewRotation;
+        private float controlPreviewYaw;
+        private float controlPreviewPitch;
+        private bool roomWarpAutoFitPending;
+        private readonly List<RoomCalibrationAnchor> roomCalibrationAnchors = new();
+        private bool roomCalibrationViewDragging;
+        private Vector2 roomCalibrationLastMouse;
+        private bool roomCalibrationShowOverview;
+        private LensCalibrationProfile roomCalibrationStartProfile;
+        private float roomOverviewYaw = 35f;
+        private float roomOverviewPitch = 24f;
+        private float roomOverviewZoom = 1f;
+        private bool roomOverviewOrbitDragging;
+        private Vector2 roomOverviewLastMouse;
+
+        private sealed class RoomCalibrationAnchor
+        {
+            public string label;
+            public Vector3 worldPoint;
+            public Vector2 targetPoint;
+            public bool adjusted;
+        }
 
         private string SettingsPath => ProjectionProcessBridge.SettingsPath;
         private string LegacyLensProfileDirectory => Path.Combine(
@@ -243,7 +269,7 @@ namespace DomeProjection
             {
                 showControls = false;
 #if !UNITY_EDITOR
-                ConfigureProjectorDisplay();
+                StartCoroutine(ConfigureProjectorDisplay());
 #endif
                 status = "Controlアプリからの入力を待っています";
                 return;
@@ -1288,6 +1314,21 @@ namespace DomeProjection
             }
             outputRenderer.ContentOpacity = playlistTransitionOpacity;
             previewRenderer.ContentOpacity = playlistTransitionOpacity;
+            var controlScale = projectorMode ? 1f : controlPreviewScale;
+            var controlRotation = projectorMode ? 0f : controlPreviewRotation;
+            var controlYaw = projectorMode ? 0f : controlPreviewYaw;
+            var controlPitch = projectorMode ? 0f : controlPreviewPitch;
+            var projectionAspect = projectorMode ? 0f : GetProjectionAspect();
+            outputRenderer.ControlPreviewScale = controlScale;
+            outputRenderer.ControlPreviewRotation = controlRotation;
+            outputRenderer.ControlPreviewYaw = controlYaw;
+            outputRenderer.ControlPreviewPitch = controlPitch;
+            outputRenderer.ProjectionAspectOverride = projectionAspect;
+            previewRenderer.ControlPreviewScale = controlScale;
+            previewRenderer.ControlPreviewRotation = controlRotation;
+            previewRenderer.ControlPreviewYaw = controlYaw;
+            previewRenderer.ControlPreviewPitch = controlPitch;
+            previewRenderer.ProjectionAspectOverride = projectionAspect;
             video.AudioVolume = playlistTransitionOpacity;
             if (focusCapturedWindowNextFrame)
             {
@@ -1334,7 +1375,8 @@ namespace DomeProjection
             if (Time.unscaledTime >= nextHeartbeatUpdate)
             {
                 nextHeartbeatUpdate = Time.unscaledTime + 0.5f;
-                ProjectionProcessBridge.WriteHeartbeat(windowCapture.HasCapturePermission);
+                ProjectionProcessBridge.WriteHeartbeat(windowCapture.HasCapturePermission,
+                    Screen.height > 0 ? (float)Screen.width / Screen.height : 1f);
             }
 
             if (ProjectionProcessBridge.StopWasRequestedAfter(projectorStartedUtcTicks))
@@ -1665,13 +1707,21 @@ namespace DomeProjection
                 GUILayout.Label(settings.sourceMode == 1
                     ? "←/→・PgUp/PgDn: スライド移動   T: 操作先へ切替   B: 待機画面   G: ガイド   H: UI   F: 全画面   Esc: 全画面解除"
                     : "1/2/3/4/5: タブ   F5/F6: 素材/画面取込   Ctrl+O: 素材選択   Space: 再生/停止   B: 待機画面   G: ガイド   H: UI", smallStyle);
+                if (settings.projectionRegionMode == 2)
+                    GUILayout.Label("W: 前面4隅ワープを開始／完了   V: 投影確認／3D俯瞰   C: 調整キャンセル", smallStyle);
                 GUILayout.Label($"出力 {Screen.width}×{Screen.height} / Display {settings.outputDisplay}", smallStyle);
                 GUILayout.EndVertical();
                 GUILayout.EndScrollView();
                 GUILayout.EndArea();
             }
 
-            DrawPanelVisibilityToggle(logicalWidth, margin);
+            if (!roomWarpEditing) DrawPanelVisibilityToggle(logicalWidth, margin);
+            if (settings.projectionRegionMode == 2 && roomWarpEditing)
+                DrawRoomAdjustmentHandles(logicalWidth, logicalHeight, margin);
+            else if (settings.projectionRegionMode == 2 && settings.roomControlViewMode > 0)
+                DrawRoomObserverEditor(logicalWidth, logicalHeight, margin);
+            else if (IsControlPreviewTransformed())
+                DrawControlPreviewFrame(logicalWidth, logicalHeight, margin, true);
             if (drawLargeTransportOverlay) DrawTransportOverlay(logicalWidth, logicalHeight, margin);
             if (showWindowDropdown && settings.sourceMode == 1) DrawWindowDropdown();
             // Cache after controls have registered their IMGUI names so plain
@@ -1812,6 +1862,1171 @@ namespace DomeProjection
             if (!showControls) showWindowDropdown = false;
         }
 
+        private void DrawRoomAdjustmentHandles(float logicalWidth, float logicalHeight, float margin)
+        {
+            if (roomWarpAutoFitPending)
+            {
+                roomWarpAutoFitPending = false;
+                FitRoomWarpPreview(logicalWidth, logicalHeight);
+            }
+            var toolbarWidth = Mathf.Min(1060f, logicalWidth - margin * 2f);
+            var toolbar = new Rect((logicalWidth - toolbarWidth) * 0.5f, margin,
+                toolbarWidth, 112f);
+            DrawSolidGuiRect(toolbar, new Color(0.12f, 0.14f, 0.17f, 0.96f));
+            GUI.Label(new Rect(toolbar.x + 12f, toolbar.y + 8f, 230f, 26f),
+                "前面4隅ワープ：各頂点をドラッグ", sectionTitleStyle);
+            GUI.Label(new Rect(toolbar.x + 246f, toolbar.y + 9f, 84f, 24f),
+                $"表示 {controlPreviewScale * 100f:0}%", smallStyle);
+            if (GUI.Button(new Rect(toolbar.x + 330f, toolbar.y + 6f, 30f, 30f), "－"))
+                controlPreviewScale = Mathf.Max(0.01f, controlPreviewScale - 0.05f);
+            controlPreviewScale = GUI.HorizontalSlider(
+                new Rect(toolbar.x + 368f, toolbar.y + 13f, 100f, 18f),
+                controlPreviewScale, 0.01f, 1f);
+            if (GUI.Button(new Rect(toolbar.x + 476f, toolbar.y + 6f, 30f, 30f), "+"))
+                controlPreviewScale = Mathf.Min(1f, controlPreviewScale + 0.05f);
+            if (GUI.Button(new Rect(toolbar.x + 514f, toolbar.y + 6f, 54f, 30f), "全体"))
+                FitRoomWarpPreview(logicalWidth, logicalHeight);
+            if (GUI.Button(new Rect(toolbar.xMax - 314f, toolbar.y + 6f, 98f, 30f), "調整キャンセル"))
+                CancelRoomWarpEditing();
+            if (!roomWarpEditing) return;
+            if (GUI.Button(new Rect(toolbar.xMax - 210f, toolbar.y + 6f, 98f, 30f), "四隅リセット"))
+            {
+                settings.ResetRoomWarp();
+                roomWarpAutoFitPending = true;
+                status = "前面4隅ワープをリセットしました";
+            }
+            if (GUI.Button(new Rect(toolbar.xMax - 106f, toolbar.y + 6f, 94f, 30f), "調整完了"))
+                FinishRoomWarpEditing();
+
+            DrawPreviewAngleControl(toolbar.x + 12f, toolbar.y + 41f,
+                "左右", ref controlPreviewYaw, -75f, 75f, false);
+            DrawPreviewAngleControl(toolbar.x + 334f, toolbar.y + 41f,
+                "上下", ref controlPreviewPitch, -75f, 75f, false);
+            if (GUI.Button(new Rect(toolbar.xMax - 210f, toolbar.y + 41f, 98f, 30f),
+                    "投影確認", roomCalibrationShowOverview ? tabStyle : activeTabStyle))
+                roomCalibrationShowOverview = false;
+            if (GUI.Button(new Rect(toolbar.xMax - 106f, toolbar.y + 41f, 94f, 30f),
+                    "3D俯瞰", roomCalibrationShowOverview ? activeTabStyle : tabStyle))
+                roomCalibrationShowOverview = true;
+            DrawPreviewAngleControl(toolbar.x + 12f, toolbar.y + 76f,
+                "傾き", ref controlPreviewRotation, -180f, 180f, true);
+            if (GUI.Button(new Rect(toolbar.xMax - 210f, toolbar.y + 76f, 198f, 30f),
+                    "Outputと同じ表示に戻す")) ResetControlPreview();
+            GUI.Label(new Rect(toolbar.x + 334f, toolbar.y + 82f, 390f, 24f),
+                "空き領域をドラッグ：確認視点を回転 / ホイール：拡大縮小", smallStyle);
+
+            if (roomCalibrationShowOverview)
+            {
+                var overviewArea = new Rect(margin, toolbar.yMax + 8f,
+                    logicalWidth - margin * 2f,
+                    logicalHeight - toolbar.yMax - margin - 8f);
+                DrawSolidGuiRect(overviewArea, new Color(0.035f, 0.045f, 0.06f, 1f));
+                DrawRoomOverviewEditor(overviewArea);
+                return;
+            }
+
+            var aspect = GetProjectionAspect();
+            DomeProjectionRenderer.CalculateRoomReferenceCorners(settings, aspect,
+                out var topLeft, out var topRight, out var bottomLeft, out var bottomRight);
+            var idealPoints = new[] { topLeft, topRight, bottomLeft, bottomRight };
+            var handleRects = new List<Rect>(4);
+            for (var index = 0; index < 4; index++)
+            {
+                var point = RoomWarpPointToGui(idealPoints[index] + GetRoomWarpPoint(index),
+                    logicalWidth, logicalHeight, aspect);
+                handleRects.Add(new Rect(point.x - 18f, point.y - 18f, 36f, 36f));
+            }
+            HandleRoomCalibrationViewDrag(toolbar, handleRects);
+            if (IsControlPreviewTransformed())
+                DrawControlPreviewFrame(logicalWidth, logicalHeight, margin, false);
+            for (var index = 0; index < 4; index++)
+                DrawRoomWarpHandle(index,
+                    RoomWarpPointToGui(idealPoints[index] + GetRoomWarpPoint(index),
+                        logicalWidth, logicalHeight, aspect),
+                    idealPoints[index], logicalWidth, logicalHeight);
+        }
+
+        private void HandleRoomCalibrationViewDrag(Rect toolbar, List<Rect> handleRects)
+        {
+            var current = Event.current;
+            var mouse = GetLogicalMousePosition();
+            if (current.type == EventType.ScrollWheel && !toolbar.Contains(mouse))
+            {
+                controlPreviewScale = Mathf.Clamp(controlPreviewScale
+                                                   * Mathf.Exp(-current.delta.y * 0.08f),
+                    0.01f, 1f);
+                current.Use();
+                return;
+            }
+            if (current.type == EventType.MouseDown && current.button == 0
+                && !toolbar.Contains(mouse))
+            {
+                foreach (var rect in handleRects)
+                    if (rect.Contains(mouse)) return;
+                roomCalibrationViewDragging = true;
+                roomCalibrationLastMouse = mouse;
+                current.Use();
+                return;
+            }
+            if (current.type == EventType.MouseDrag && roomCalibrationViewDragging)
+            {
+                var delta = mouse - roomCalibrationLastMouse;
+                roomCalibrationLastMouse = mouse;
+                controlPreviewYaw = Mathf.Clamp(controlPreviewYaw - delta.x * 0.18f, -85f, 85f);
+                controlPreviewPitch = Mathf.Clamp(controlPreviewPitch + delta.y * 0.18f, -85f, 85f);
+                current.Use();
+                return;
+            }
+            if (current.rawType == EventType.MouseUp) roomCalibrationViewDragging = false;
+        }
+
+        private void DrawRoomCalibrationHandle(int index, float logicalWidth,
+            float logicalHeight, float aspect)
+        {
+            var anchor = roomCalibrationAnchors[index];
+            var screenPoint = RoomWarpPointToGui(anchor.targetPoint, logicalWidth,
+                logicalHeight, aspect);
+            const float hitSize = 36f;
+            if (screenPoint.x < -hitSize || screenPoint.x > logicalWidth + hitSize
+                || screenPoint.y < -hitSize || screenPoint.y > logicalHeight + hitSize)
+                return;
+            var hitRect = new Rect(screenPoint.x - hitSize * 0.5f,
+                screenPoint.y - hitSize * 0.5f, hitSize, hitSize);
+            var moved = DrawDraggableHandleWindow(62100 + index, hitRect);
+            if ((moved.position - hitRect.position).sqrMagnitude > 0.01f)
+            {
+                var displayPoint = new Vector2(moved.center.x / Mathf.Max(logicalWidth, 1f),
+                    1f - moved.center.y / Mathf.Max(logicalHeight, 1f));
+                anchor.targetPoint = InverseControlPreviewPoint(displayPoint, aspect);
+                anchor.targetPoint.x = Mathf.Clamp(anchor.targetPoint.x, -2f, 3f);
+                anchor.targetPoint.y = Mathf.Clamp(anchor.targetPoint.y, -2f, 3f);
+                anchor.adjusted = true;
+                SolveRoomProjectorFromAnchors(aspect);
+            }
+
+            var color = anchor.adjusted
+                ? new Color(1f, 0.72f, 0.10f, 1f)
+                : new Color(0.10f, 0.82f, 1f, 1f);
+            DrawSolidGuiRect(new Rect(screenPoint.x - 13f, screenPoint.y - 2f, 26f, 4f), color);
+            DrawSolidGuiRect(new Rect(screenPoint.x - 2f, screenPoint.y - 13f, 4f, 26f), color);
+            DrawSolidGuiRect(new Rect(screenPoint.x - 6f, screenPoint.y - 6f, 12f, 12f), Color.white);
+            DrawSolidGuiRect(new Rect(screenPoint.x - 3f, screenPoint.y - 3f, 6f, 6f), color);
+            GUI.Label(new Rect(screenPoint.x + 14f, screenPoint.y - 12f, 150f, 24f),
+                anchor.label, smallStyle);
+
+            if (DomeProjectionRenderer.TryProjectRoomPoint(settings, aspect,
+                    anchor.worldPoint, out var projected))
+            {
+                var projectedGui = RoomWarpPointToGui(projected, logicalWidth,
+                    logicalHeight, aspect);
+                DrawGuiSegment(projectedGui, screenPoint,
+                    new Color(color.r, color.g, color.b, 0.55f), 2f);
+            }
+        }
+
+        private void BuildRoomCalibrationAnchors()
+        {
+            roomCalibrationAnchors.Clear();
+            var aspect = GetProjectionAspect();
+            var halfWidth = settings.roomWidth * 0.5f;
+            // The literal rear corners can be behind a projector placed near
+            // the rear wall. Keep them when optically reachable, and otherwise
+            // use one measured midpoint on each longitudinal seam plus the
+            // four opposite-wall corners. Eight well-spread observations are
+            // enough to constrain the seven projector parameters without the
+            // unreadable forest of handles produced by sampling every 25%.
+            var depthFractions = new[] { 0f, 0.5f, 1f };
+            foreach (var fraction in depthFractions)
+            {
+                var z = settings.roomDepth * fraction;
+                var depthLabel = fraction <= 0.001f ? "背面"
+                    : fraction >= 0.999f ? "前面"
+                    : $"奥行{fraction * 100f:0}%";
+                AddRoomCalibrationAnchor($"左天井・{depthLabel}",
+                    new Vector3(-halfWidth, settings.roomHeight, z), aspect);
+                AddRoomCalibrationAnchor($"右天井・{depthLabel}",
+                    new Vector3(halfWidth, settings.roomHeight, z), aspect);
+                AddRoomCalibrationAnchor($"左床・{depthLabel}",
+                    new Vector3(-halfWidth, 0f, z), aspect);
+                AddRoomCalibrationAnchor($"右床・{depthLabel}",
+                    new Vector3(halfWidth, 0f, z), aspect);
+            }
+
+        }
+
+        private void AddRoomCalibrationAnchor(string label, Vector3 worldPoint, float aspect)
+        {
+            if (!DomeProjectionRenderer.TryProjectRoomPoint(settings, aspect,
+                    worldPoint, out var point)) return;
+            roomCalibrationAnchors.Add(new RoomCalibrationAnchor
+            {
+                label = label,
+                worldPoint = worldPoint,
+                targetPoint = point,
+                adjusted = false
+            });
+        }
+
+        private void ResetRoomCalibrationTargets()
+        {
+            BuildRoomCalibrationAnchors();
+            FitRoomCalibrationPreview();
+            status = "多点校正の交点を現在の投影位置へ戻しました";
+        }
+
+        private void FitRoomCalibrationPreview()
+        {
+            if (roomCalibrationAnchors.Count == 0) return;
+            var aspect = GetProjectionAspect();
+            var maxHorizontal = 0.001f;
+            var maxVertical = 0.001f;
+            var previousScale = controlPreviewScale;
+            controlPreviewScale = 1f;
+            foreach (var anchor in roomCalibrationAnchors)
+            {
+                var point = ApplyControlPreviewPoint(anchor.targetPoint, aspect);
+                maxHorizontal = Mathf.Max(maxHorizontal, Mathf.Abs(point.x - 0.5f));
+                maxVertical = Mathf.Max(maxVertical, Mathf.Abs(point.y - 0.5f));
+            }
+            controlPreviewScale = previousScale;
+            controlPreviewScale = Mathf.Clamp(Mathf.Min(0.44f / maxHorizontal,
+                0.39f / maxVertical), 0.01f, 1f);
+        }
+
+        private void SolveRoomProjectorFromAnchors(float aspect)
+        {
+            if (roomCalibrationAnchors.Count < 4)
+            {
+                status = "多点校正には画面内の室内交点が4点以上必要です";
+                return;
+            }
+
+            var parameters = GetRoomProjectorParameters();
+            var startParameters = GetRoomCalibrationStartParameters(parameters);
+            var scales = new[] { 0.08, 0.08, 0.08, 1.0, 1.0, 1.0, 1.5 };
+            var priorSigmas = new[]
+            {
+                Math.Max(0.30, settings.roomWidth * 0.12),
+                Math.Max(0.20, settings.roomHeight * 0.12),
+                Math.Max(0.30, settings.roomDepth * 0.12),
+                15.0, 15.0, 12.0, 18.0
+            };
+            var adjustedCount = CountAdjustedRoomCalibrationAnchors();
+            // With only one or two observations, seven free projector
+            // parameters have many mathematically valid but physically absurd
+            // solutions. Keep the estimate near the measured/rough starting
+            // pose until enough independent room intersections are supplied.
+            var priorWeight = adjustedCount switch
+            {
+                0 => 8.0,
+                1 => 5.0,
+                2 => 2.5,
+                3 => 1.0,
+                _ => 0.12
+            };
+            var lambda = 0.003;
+            var bestCost = EvaluateRoomCalibration(parameters, aspect, startParameters,
+                priorSigmas, priorWeight, adjustedCount, out var baseProjection);
+            if (double.IsInfinity(bestCost)) return;
+            for (var iteration = 0; iteration < 10; iteration++)
+            {
+                const double epsilon = 0.02;
+                var jacobian = new double[roomCalibrationAnchors.Count * 2, 7];
+                for (var parameterIndex = 0; parameterIndex < 7; parameterIndex++)
+                {
+                    var perturbed = (double[])parameters.Clone();
+                    perturbed[parameterIndex] += scales[parameterIndex] * epsilon;
+                    ClampRoomProjectorParameters(perturbed);
+                    if (double.IsInfinity(EvaluateRoomCalibration(perturbed, aspect,
+                            startParameters, priorSigmas, priorWeight, adjustedCount,
+                            out var perturbedProjection))) continue;
+                    for (var anchorIndex = 0; anchorIndex < roomCalibrationAnchors.Count;
+                         anchorIndex++)
+                    {
+                        jacobian[anchorIndex * 2, parameterIndex] =
+                            (perturbedProjection[anchorIndex].x - baseProjection[anchorIndex].x)
+                            / epsilon;
+                        jacobian[anchorIndex * 2 + 1, parameterIndex] =
+                            (perturbedProjection[anchorIndex].y - baseProjection[anchorIndex].y)
+                            / epsilon;
+                    }
+                }
+
+                var normal = new double[7, 7];
+                var right = new double[7];
+                for (var anchorIndex = 0; anchorIndex < roomCalibrationAnchors.Count;
+                     anchorIndex++)
+                {
+                    var anchor = roomCalibrationAnchors[anchorIndex];
+                    var weight = GetRoomAnchorWeight(anchor, adjustedCount);
+                    var residualX = anchor.targetPoint.x - baseProjection[anchorIndex].x;
+                    var residualY = anchor.targetPoint.y - baseProjection[anchorIndex].y;
+                    for (var column = 0; column < 7; column++)
+                    {
+                        var jx = jacobian[anchorIndex * 2, column];
+                        var jy = jacobian[anchorIndex * 2 + 1, column];
+                        right[column] += weight * (jx * residualX + jy * residualY);
+                        for (var row = 0; row < 7; row++)
+                            normal[column, row] += weight *
+                                (jx * jacobian[anchorIndex * 2, row]
+                                 + jy * jacobian[anchorIndex * 2 + 1, row]);
+                    }
+                }
+                for (var parameterIndex = 0; parameterIndex < 7; parameterIndex++)
+                {
+                    var derivative = scales[parameterIndex] / priorSigmas[parameterIndex];
+                    var residual = (startParameters[parameterIndex]
+                                    - parameters[parameterIndex]) / priorSigmas[parameterIndex];
+                    normal[parameterIndex, parameterIndex] +=
+                        priorWeight * derivative * derivative;
+                    right[parameterIndex] += priorWeight * derivative * residual;
+                }
+                for (var diagonal = 0; diagonal < 7; diagonal++)
+                    normal[diagonal, diagonal] += lambda;
+                if (!TrySolveLinearSystem(normal, right, out var delta)) break;
+
+                var candidate = (double[])parameters.Clone();
+                for (var parameterIndex = 0; parameterIndex < 7; parameterIndex++)
+                    candidate[parameterIndex] += scales[parameterIndex]
+                                                 * Math.Max(-1.5, Math.Min(1.5, delta[parameterIndex]));
+                ClampRoomProjectorParameters(candidate);
+                var candidateCost = EvaluateRoomCalibration(candidate, aspect,
+                    startParameters, priorSigmas, priorWeight, adjustedCount,
+                    out var candidateProjection);
+                if (candidateCost < bestCost)
+                {
+                    parameters = candidate;
+                    baseProjection = candidateProjection;
+                    bestCost = candidateCost;
+                    lambda = Math.Max(0.00001, lambda * 0.35);
+                }
+                else
+                {
+                    SetRoomProjectorParameters(parameters);
+                    lambda *= 8.0;
+                }
+            }
+            SetRoomProjectorParameters(parameters);
+            settings.Clamp();
+            status = $"室内多点校正中：{adjustedCount}点を指定 / 誤差 {Math.Sqrt(bestCost):0.0000}";
+        }
+
+        private double EvaluateRoomCalibration(double[] parameters, float aspect,
+            double[] startParameters, double[] priorSigmas, double priorWeight,
+            int adjustedCount, out Vector2[] projected)
+        {
+            SetRoomProjectorParameters(parameters);
+            projected = new Vector2[roomCalibrationAnchors.Count];
+            var cost = 0.0;
+            for (var index = 0; index < roomCalibrationAnchors.Count; index++)
+            {
+                var anchor = roomCalibrationAnchors[index];
+                if (!DomeProjectionRenderer.TryProjectRoomPoint(settings, aspect,
+                        anchor.worldPoint, out projected[index]))
+                    return double.PositiveInfinity;
+                var difference = anchor.targetPoint - projected[index];
+                var weight = GetRoomAnchorWeight(anchor, adjustedCount);
+                cost += weight * difference.sqrMagnitude;
+            }
+            for (var parameterIndex = 0; parameterIndex < 7; parameterIndex++)
+            {
+                var difference = (parameters[parameterIndex]
+                                  - startParameters[parameterIndex])
+                                 / priorSigmas[parameterIndex];
+                cost += priorWeight * difference * difference;
+            }
+            return cost;
+        }
+
+        private int CountAdjustedRoomCalibrationAnchors()
+        {
+            var count = 0;
+            foreach (var anchor in roomCalibrationAnchors)
+                if (anchor.adjusted) count++;
+            return count;
+        }
+
+        private static double GetRoomAnchorWeight(RoomCalibrationAnchor anchor,
+            int adjustedCount)
+        {
+            if (anchor.adjusted) return 8.0;
+            // Unedited points describe the current plausible projection. They
+            // are deliberately stronger during the first few drags so one
+            // point cannot send FOV or pitch to its hard limit.
+            return adjustedCount < 2 ? 2.0 : adjustedCount < 4 ? 0.9 : 0.30;
+        }
+
+        private double[] GetRoomProjectorParameters()
+        {
+            return new[]
+            {
+                (double)settings.roomProjectorX, settings.roomProjectorY,
+                settings.roomProjectorZ, settings.roomProjectorYaw,
+                settings.roomProjectorPitch, settings.roomProjectorRoll,
+                settings.roomProjectorHorizontalFov
+            };
+        }
+
+        private double[] GetRoomCalibrationStartParameters(double[] fallback)
+        {
+            if (roomCalibrationStartProfile == null) return (double[])fallback.Clone();
+            return new[]
+            {
+                (double)roomCalibrationStartProfile.roomProjectorX,
+                roomCalibrationStartProfile.roomProjectorY,
+                roomCalibrationStartProfile.roomProjectorZ,
+                roomCalibrationStartProfile.roomProjectorYaw,
+                roomCalibrationStartProfile.roomProjectorPitch,
+                roomCalibrationStartProfile.roomProjectorRoll,
+                roomCalibrationStartProfile.roomProjectorHorizontalFov
+            };
+        }
+
+        private void SetRoomProjectorParameters(double[] values)
+        {
+            settings.roomProjectorX = (float)values[0];
+            settings.roomProjectorY = (float)values[1];
+            settings.roomProjectorZ = (float)values[2];
+            settings.roomProjectorYaw = (float)values[3];
+            settings.roomProjectorPitch = (float)values[4];
+            settings.roomProjectorRoll = (float)values[5];
+            settings.roomProjectorHorizontalFov = (float)values[6];
+        }
+
+        private static void ClampRoomProjectorParameters(double[] values)
+        {
+            values[0] = Math.Max(-30.0, Math.Min(30.0, values[0]));
+            values[1] = Math.Max(-2.0, Math.Min(12.0, values[1]));
+            values[2] = Math.Max(-5.0, Math.Min(35.0, values[2]));
+            values[3] = Math.Max(-180.0, Math.Min(180.0, values[3]));
+            values[4] = Math.Max(-89.0, Math.Min(89.0, values[4]));
+            values[5] = Math.Max(-180.0, Math.Min(180.0, values[5]));
+            values[6] = Math.Max(10.0, Math.Min(170.0, values[6]));
+        }
+
+        private static bool TrySolveLinearSystem(double[,] matrix, double[] vector,
+            out double[] solution)
+        {
+            const int size = 7;
+            var augmented = new double[size, size + 1];
+            for (var row = 0; row < size; row++)
+            {
+                for (var column = 0; column < size; column++)
+                    augmented[row, column] = matrix[row, column];
+                augmented[row, size] = vector[row];
+            }
+            for (var pivot = 0; pivot < size; pivot++)
+            {
+                var bestRow = pivot;
+                for (var row = pivot + 1; row < size; row++)
+                    if (Math.Abs(augmented[row, pivot]) > Math.Abs(augmented[bestRow, pivot]))
+                        bestRow = row;
+                if (Math.Abs(augmented[bestRow, pivot]) < 1e-12)
+                {
+                    solution = null;
+                    return false;
+                }
+                if (bestRow != pivot)
+                    for (var column = pivot; column <= size; column++)
+                    {
+                        var swap = augmented[pivot, column];
+                        augmented[pivot, column] = augmented[bestRow, column];
+                        augmented[bestRow, column] = swap;
+                    }
+                var divisor = augmented[pivot, pivot];
+                for (var column = pivot; column <= size; column++)
+                    augmented[pivot, column] /= divisor;
+                for (var row = 0; row < size; row++)
+                {
+                    if (row == pivot) continue;
+                    var factor = augmented[row, pivot];
+                    for (var column = pivot; column <= size; column++)
+                        augmented[row, column] -= factor * augmented[pivot, column];
+                }
+            }
+            solution = new double[size];
+            for (var row = 0; row < size; row++) solution[row] = augmented[row, size];
+            return true;
+        }
+
+        private void DrawPreviewAngleControl(float x, float y, string label,
+            ref float value, float minimum, float maximum, bool wrap)
+        {
+            GUI.Label(new Rect(x, y + 5f, 74f, 24f), $"{label} {value:0}°", smallStyle);
+            if (GUI.Button(new Rect(x + 76f, y, 40f, 30f), "－5"))
+                value = wrap ? NormalizeControlPreviewRotation(value - 5f)
+                    : Mathf.Clamp(value - 5f, minimum, maximum);
+            value = GUI.HorizontalSlider(new Rect(x + 122f, y + 7f, 100f, 18f),
+                value, minimum, maximum);
+            if (GUI.Button(new Rect(x + 228f, y, 40f, 30f), "+5"))
+                value = wrap ? NormalizeControlPreviewRotation(value + 5f)
+                    : Mathf.Clamp(value + 5f, minimum, maximum);
+            if (GUI.Button(new Rect(x + 274f, y, 40f, 30f), "0°")) value = 0f;
+        }
+
+        private void DrawRoomWarpHandle(int index, Vector2 screenPoint, Vector2 idealPoint,
+            float logicalWidth, float logicalHeight)
+        {
+            const float hitSize = 34f;
+            // Never substitute a screen-edge point for a real room-face
+            // corner. That made the displayed handle disagree with the value
+            // being edited and caused large jumps. "全体" / auto-fit makes
+            // the true point visible instead.
+            if (screenPoint.x < -hitSize || screenPoint.x > logicalWidth + hitSize
+                || screenPoint.y < -hitSize || screenPoint.y > logicalHeight + hitSize)
+                return;
+            var visiblePoint = screenPoint;
+            var hitRect = new Rect(visiblePoint.x - hitSize * 0.5f,
+                visiblePoint.y - hitSize * 0.5f, hitSize, hitSize);
+            if (showControls && panelAreaRect.Contains(visiblePoint)) return;
+
+            // Let IMGUI perform the drag itself. Its native window drag path
+            // already accounts for Retina/DPI scaling and GUI.matrix, unlike
+            // manually comparing Event.mousePosition in platform-dependent
+            // coordinate spaces.
+            var movedRect = DrawDraggableHandleWindow(62010 + index, hitRect);
+            if ((movedRect.position - hitRect.position).sqrMagnitude > 0.01f)
+            {
+                visiblePoint = movedRect.center;
+                var displayPoint = new Vector2(
+                    visiblePoint.x / Mathf.Max(logicalWidth, 1f),
+                    1f - visiblePoint.y / Mathf.Max(logicalHeight, 1f));
+                var aspect = GetProjectionAspect();
+                var targetPoint = InverseControlPreviewPoint(displayPoint, aspect);
+                targetPoint.x = Mathf.Clamp(targetPoint.x, -2f, 3f);
+                targetPoint.y = Mathf.Clamp(targetPoint.y, -2f, 3f);
+                var previousPoint = GetRoomWarpPoint(index);
+                SetRoomWarpPoint(index, targetPoint - idealPoint);
+                if (!IsCurrentRoomWarpQuadValid(aspect))
+                {
+                    SetRoomWarpPoint(index, previousPoint);
+                    status = "4隅が交差する位置には移動できません";
+                }
+            }
+
+            var handleColor = index < 2
+                ? new Color(1f, 0.76f, 0.12f, 1f)
+                : new Color(0.10f, 0.82f, 1f, 1f);
+            DrawSolidGuiRect(new Rect(visiblePoint.x - 13f, visiblePoint.y - 2f, 26f, 4f), handleColor);
+            DrawSolidGuiRect(new Rect(visiblePoint.x - 2f, visiblePoint.y - 13f, 4f, 26f), handleColor);
+            DrawSolidGuiRect(new Rect(visiblePoint.x - 6f, visiblePoint.y - 6f, 12f, 12f), Color.white);
+            DrawSolidGuiRect(new Rect(visiblePoint.x - 3f, visiblePoint.y - 3f, 6f, 6f), handleColor);
+            var face = GetRoomReferenceFaceLabel();
+            var labels = new[] { face + " 左上", face + " 右上", face + " 左下", face + " 右下" };
+            GUI.Label(new Rect(visiblePoint.x + 14f, visiblePoint.y - 12f, 78f, 24f),
+                labels[index], smallStyle);
+        }
+
+        private Vector2 GetRoomWarpPoint(int index)
+        {
+            return index switch
+            {
+                0 => new Vector2(settings.roomWarpTopLeftX, settings.roomWarpTopLeftY),
+                1 => new Vector2(settings.roomWarpTopRightX, settings.roomWarpTopRightY),
+                2 => new Vector2(settings.roomWarpBottomLeftX, settings.roomWarpBottomLeftY),
+                _ => new Vector2(settings.roomWarpBottomRightX, settings.roomWarpBottomRightY)
+            };
+        }
+
+        private void SetRoomWarpPoint(int index, Vector2 value)
+        {
+            switch (index)
+            {
+                case 0:
+                    settings.roomWarpTopLeftX = value.x;
+                    settings.roomWarpTopLeftY = value.y;
+                    break;
+                case 1:
+                    settings.roomWarpTopRightX = value.x;
+                    settings.roomWarpTopRightY = value.y;
+                    break;
+                case 2:
+                    settings.roomWarpBottomLeftX = value.x;
+                    settings.roomWarpBottomLeftY = value.y;
+                    break;
+                default:
+                    settings.roomWarpBottomRightX = value.x;
+                    settings.roomWarpBottomRightY = value.y;
+                    break;
+            }
+        }
+
+        private bool IsCurrentRoomWarpQuadValid(float aspect)
+        {
+            DomeProjectionRenderer.CalculateRoomReferenceCorners(settings, aspect,
+                out var topLeft, out var topRight, out var bottomLeft, out var bottomRight);
+            return DomeProjectionRenderer.IsValidRoomQuad(
+                topLeft + GetRoomWarpPoint(0), topRight + GetRoomWarpPoint(1),
+                bottomLeft + GetRoomWarpPoint(2), bottomRight + GetRoomWarpPoint(3));
+        }
+
+        private Vector2 RoomWarpPointToGui(Vector2 point, float width, float height, float aspect)
+        {
+            var displayed = ApplyControlPreviewPoint(point, aspect);
+            return new Vector2(displayed.x * width, (1f - displayed.y) * height);
+        }
+
+        private Vector2 ApplyControlPreviewPoint(Vector2 point, float aspect)
+        {
+            aspect = Mathf.Max(aspect, 0.01f);
+            var offset = point - Vector2.one * 0.5f;
+            offset.x *= aspect;
+            var ray = new Vector3(offset.x, offset.y, 0.5f);
+            ray = RotateControlPreviewYaw(ray, -controlPreviewYaw);
+            ray = RotateControlPreviewPitch(ray, controlPreviewPitch);
+            if (ray.z <= 0.0001f)
+                return new Vector2(Mathf.Sign(ray.x) * 1000f, Mathf.Sign(ray.y) * 1000f);
+            offset = new Vector2(ray.x, ray.y) * (0.5f / ray.z);
+            var angle = controlPreviewRotation * Mathf.Deg2Rad;
+            var cosine = Mathf.Cos(angle);
+            var sine = Mathf.Sin(angle);
+            offset = new Vector2(cosine * offset.x - sine * offset.y,
+                sine * offset.x + cosine * offset.y);
+            offset *= Mathf.Clamp(controlPreviewScale, 0.01f, 1f);
+            offset.x /= aspect;
+            return offset + Vector2.one * 0.5f;
+        }
+
+        private Vector2 InverseControlPreviewPoint(Vector2 point, float aspect)
+        {
+            aspect = Mathf.Max(aspect, 0.01f);
+            var offset = point - Vector2.one * 0.5f;
+            offset.x *= aspect;
+            offset /= Mathf.Clamp(controlPreviewScale, 0.01f, 1f);
+            var angle = controlPreviewRotation * Mathf.Deg2Rad;
+            var cosine = Mathf.Cos(angle);
+            var sine = Mathf.Sin(angle);
+            offset = new Vector2(cosine * offset.x + sine * offset.y,
+                -sine * offset.x + cosine * offset.y);
+            var ray = new Vector3(offset.x, offset.y, 0.5f);
+            ray = RotateControlPreviewPitch(ray, -controlPreviewPitch);
+            ray = RotateControlPreviewYaw(ray, controlPreviewYaw);
+            if (ray.z <= 0.0001f)
+                return new Vector2(Mathf.Sign(ray.x) * 1000f, Mathf.Sign(ray.y) * 1000f);
+            offset = new Vector2(ray.x, ray.y) * (0.5f / ray.z);
+            offset.x /= aspect;
+            return offset + Vector2.one * 0.5f;
+        }
+
+        private static Vector3 RotateControlPreviewYaw(Vector3 ray, float degrees)
+        {
+            var angle = degrees * Mathf.Deg2Rad;
+            var cosine = Mathf.Cos(angle);
+            var sine = Mathf.Sin(angle);
+            return new Vector3(cosine * ray.x + sine * ray.z, ray.y,
+                -sine * ray.x + cosine * ray.z);
+        }
+
+        private static Vector3 RotateControlPreviewPitch(Vector3 ray, float degrees)
+        {
+            var angle = degrees * Mathf.Deg2Rad;
+            var cosine = Mathf.Cos(angle);
+            var sine = Mathf.Sin(angle);
+            return new Vector3(ray.x, cosine * ray.y - sine * ray.z,
+                sine * ray.y + cosine * ray.z);
+        }
+
+        private bool IsControlPreviewTransformed()
+        {
+            return controlPreviewScale < 0.999f
+                   || Mathf.Abs(controlPreviewRotation) > 0.01f
+                   || Mathf.Abs(controlPreviewYaw) > 0.01f
+                   || Mathf.Abs(controlPreviewPitch) > 0.01f;
+        }
+
+        private void ResetControlPreview()
+        {
+            controlPreviewScale = 1f;
+            controlPreviewRotation = 0f;
+            controlPreviewYaw = 0f;
+            controlPreviewPitch = 0f;
+        }
+
+        private static float NormalizeControlPreviewRotation(float value)
+        {
+            return Mathf.Repeat(value + 180f, 360f) - 180f;
+        }
+
+        private static float GetProjectionAspect()
+        {
+            var outputAspect = ProjectionProcessBridge.OutputAspect;
+            if (outputAspect > 0.1f) return outputAspect;
+            return Screen.height > 0 ? (float)Screen.width / Screen.height : 1f;
+        }
+
+        private void DrawControlPreviewFrame(float logicalWidth, float logicalHeight,
+            float margin, bool showResetButton)
+        {
+            if (showResetButton)
+            {
+                const float width = 520f;
+                var x = (logicalWidth - width) * 0.5f;
+                var bar = new Rect(x, margin, width, 38f);
+                DrawSolidGuiRect(bar, new Color(0.12f, 0.14f, 0.17f, 0.94f));
+                GUI.Label(new Rect(x + 10f, margin + 8f, 335f, 24f),
+                    $"Control確認 {controlPreviewScale * 100f:0}% / 左右{controlPreviewYaw:0}° / 上下{controlPreviewPitch:0}° / 傾き{controlPreviewRotation:0}°",
+                    smallStyle);
+                if (GUI.Button(new Rect(x + 350f, margin + 5f, 160f, 28f),
+                        "Output表示に戻す"))
+                    ResetControlPreview();
+                return;
+            }
+
+            var aspect = GetProjectionAspect();
+            var topLeft = RoomWarpPointToGui(new Vector2(0f, 1f), logicalWidth, logicalHeight, aspect);
+            var topRight = RoomWarpPointToGui(new Vector2(1f, 1f), logicalWidth, logicalHeight, aspect);
+            var bottomRight = RoomWarpPointToGui(new Vector2(1f, 0f), logicalWidth, logicalHeight, aspect);
+            var bottomLeft = RoomWarpPointToGui(new Vector2(0f, 0f), logicalWidth, logicalHeight, aspect);
+            var frameColor = new Color(0.2f, 0.85f, 1f, 0.92f);
+            DrawGuiSegment(topLeft, topRight, frameColor, 2f);
+            DrawGuiSegment(topRight, bottomRight, frameColor, 2f);
+            DrawGuiSegment(bottomRight, bottomLeft, frameColor, 2f);
+            DrawGuiSegment(bottomLeft, topLeft, frameColor, 2f);
+
+        }
+
+        private void FitRoomWarpPreview(float logicalWidth, float logicalHeight)
+        {
+            var aspect = GetProjectionAspect();
+            DomeProjectionRenderer.CalculateRoomReferenceCorners(settings, aspect,
+                out var topLeft, out var topRight, out var bottomLeft, out var bottomRight);
+            var points = new[]
+            {
+                topLeft + GetRoomWarpPoint(0), topRight + GetRoomWarpPoint(1),
+                bottomLeft + GetRoomWarpPoint(2), bottomRight + GetRoomWarpPoint(3)
+            };
+            var maxHorizontal = 0.001f;
+            var maxVertical = 0.001f;
+            foreach (var sourcePoint in points)
+            {
+                // Fit the already-rotated view, then apply the calculated
+                // uniform scale. Rotation therefore never pushes a handle out
+                // of the Control window after "全体" is pressed.
+                var previousScale = controlPreviewScale;
+                controlPreviewScale = 1f;
+                var point = ApplyControlPreviewPoint(sourcePoint, aspect);
+                controlPreviewScale = previousScale;
+                maxHorizontal = Mathf.Max(maxHorizontal, Mathf.Abs(point.x - 0.5f));
+                maxVertical = Mathf.Max(maxVertical, Mathf.Abs(point.y - 0.5f));
+            }
+
+            // Leave room for labels and the toolbar while keeping all four
+            // projected corners inside the Control window.
+            var horizontalScale = 0.44f / maxHorizontal;
+            var verticalScale = 0.39f / maxVertical;
+            controlPreviewScale = Mathf.Clamp(Mathf.Min(horizontalScale, verticalScale), 0.01f, 1f);
+        }
+
+        private string GetRoomReferenceFaceLabel()
+        {
+            return settings.roomWarpReferenceFace switch
+            {
+                1 => "天井",
+                2 => "床",
+                3 => "左壁",
+                4 => "右壁",
+                _ => "前面"
+            };
+        }
+
+        private void DrawRoomObserverEditor(float logicalWidth, float logicalHeight, float margin)
+        {
+            var available = new Rect(margin, 58f, logicalWidth - margin * 2f,
+                logicalHeight - 78f);
+            if (showControls)
+            {
+                const float panelButtonAllowance = 165f;
+                if (settings.controlPanelOnRight)
+                    available.xMax = panelAreaRect.x - panelButtonAllowance;
+                else
+                {
+                    available.xMin = panelAreaRect.xMax + panelButtonAllowance;
+                    available.width = logicalWidth - margin - available.xMin;
+                }
+            }
+            if (available.width < 260f || available.height < 240f) return;
+
+            // Keep the diagnostic diagram opaque. Otherwise the projected
+            // room grid underneath reads as unrelated diagonal lines inside
+            // the third-person editor.
+            DrawSolidGuiRect(available, new Color(0.035f, 0.045f, 0.06f, 1f));
+            var overview = settings.roomControlViewMode == 1;
+            var topView = settings.roomControlViewMode == 2;
+            GUI.Label(new Rect(available.x + 16f, available.y + 12f,
+                    available.width - 32f, 28f),
+                overview
+                    ? "第三者視点・俯瞰3D　空き領域をドラッグして視点回転 / ホイールで拡大縮小"
+                    : topView
+                        ? "第三者視点・上面図　観測者をドラッグ：X / Z"
+                        : "第三者視点・側面図　観測者をドラッグ：Z / Y",
+                sectionTitleStyle);
+
+            if (overview)
+            {
+                DrawRoomOverviewEditor(available);
+                return;
+            }
+
+            var worldWidth = topView ? settings.roomWidth : settings.roomDepth;
+            var worldHeight = topView ? settings.roomDepth : settings.roomHeight;
+            var fit = new Rect(available.x + 54f, available.y + 58f,
+                available.width - 108f, available.height - 112f);
+            var worldAspect = worldWidth / Mathf.Max(worldHeight, 0.01f);
+            if (fit.width / fit.height > worldAspect)
+            {
+                var width = fit.height * worldAspect;
+                fit.x += (fit.width - width) * 0.5f;
+                fit.width = width;
+            }
+            else
+            {
+                var height = fit.width / worldAspect;
+                fit.y += (fit.height - height) * 0.5f;
+                fit.height = height;
+            }
+
+            DrawSolidGuiRect(fit, new Color(0.10f, 0.12f, 0.15f, 1f));
+            var xAxis = new Color(1f, 0.12f, 0.12f, 1f);
+            var yAxis = new Color(0.12f, 1f, 0.22f, 1f);
+            var zAxis = new Color(0.12f, 0.38f, 1f, 1f);
+            if (topView)
+            {
+                DrawSolidGuiRect(new Rect(fit.x, fit.y, fit.width, 4f), xAxis);
+                DrawSolidGuiRect(new Rect(fit.x, fit.yMax - 4f, fit.width, 4f), xAxis);
+                DrawSolidGuiRect(new Rect(fit.x, fit.y, 4f, fit.height), zAxis);
+                DrawSolidGuiRect(new Rect(fit.xMax - 4f, fit.y, 4f, fit.height), zAxis);
+                GUI.Label(new Rect(fit.x + 8f, fit.y + 8f, 120f, 24f), "前壁 Z=奥行き", smallStyle);
+                GUI.Label(new Rect(fit.x + 8f, fit.yMax - 28f, 100f, 24f), "後方 Z=0", smallStyle);
+            }
+            else
+            {
+                DrawSolidGuiRect(new Rect(fit.x, fit.y, fit.width, 4f), zAxis);
+                DrawSolidGuiRect(new Rect(fit.x, fit.yMax - 4f, fit.width, 4f), zAxis);
+                DrawSolidGuiRect(new Rect(fit.x, fit.y, 4f, fit.height), yAxis);
+                DrawSolidGuiRect(new Rect(fit.xMax - 4f, fit.y, 4f, fit.height), yAxis);
+                GUI.Label(new Rect(fit.x + 8f, fit.y + 8f, 100f, 24f), "天井 Y=高さ", smallStyle);
+                GUI.Label(new Rect(fit.x + 8f, fit.yMax - 28f, 100f, 24f), "床 Y=0", smallStyle);
+            }
+
+            var observer = topView
+                ? new Vector2(Mathf.InverseLerp(-settings.roomWidth * 0.5f,
+                        settings.roomWidth * 0.5f, settings.roomViewerX),
+                    Mathf.InverseLerp(settings.roomDepth, 0f, settings.roomViewerZ))
+                : new Vector2(Mathf.InverseLerp(0f, settings.roomDepth, settings.roomViewerZ),
+                    Mathf.InverseLerp(settings.roomHeight, 0f, settings.roomViewerY));
+            var projector = topView
+                ? new Vector2(Mathf.InverseLerp(-settings.roomWidth * 0.5f,
+                        settings.roomWidth * 0.5f, settings.roomProjectorX),
+                    Mathf.InverseLerp(settings.roomDepth, 0f, settings.roomProjectorZ))
+                : new Vector2(Mathf.InverseLerp(0f, settings.roomDepth, settings.roomProjectorZ),
+                    Mathf.InverseLerp(settings.roomHeight, 0f, settings.roomProjectorY));
+            var observerPoint = new Vector2(Mathf.Lerp(fit.x, fit.xMax, observer.x),
+                Mathf.Lerp(fit.y, fit.yMax, observer.y));
+            var projectorPoint = new Vector2(Mathf.Lerp(fit.x, fit.xMax, projector.x),
+                Mathf.Lerp(fit.y, fit.yMax, projector.y));
+
+            DrawSolidGuiRect(new Rect(projectorPoint.x - 8f, projectorPoint.y - 8f, 16f, 16f),
+                new Color(0.15f, 0.72f, 1f, 1f));
+            GUI.Label(new Rect(projectorPoint.x + 11f, projectorPoint.y - 12f, 110f, 24f),
+                "プロジェクター", smallStyle);
+
+            const float observerHitSize = 42f;
+            var observerHit = new Rect(observerPoint.x - observerHitSize * 0.5f,
+                observerPoint.y - observerHitSize * 0.5f, observerHitSize, observerHitSize);
+            var movedObserver = DrawDraggableHandleWindow(62020, observerHit);
+            if ((movedObserver.position - observerHit.position).sqrMagnitude > 0.01f)
+            {
+                observerPoint = movedObserver.center;
+                var mousePosition = observerPoint;
+                var normalizedX = Mathf.Clamp01(Mathf.InverseLerp(fit.x, fit.xMax, mousePosition.x));
+                var normalizedY = Mathf.Clamp01(Mathf.InverseLerp(fit.y, fit.yMax, mousePosition.y));
+                if (topView)
+                {
+                    settings.roomViewerX = Mathf.Lerp(-settings.roomWidth * 0.5f,
+                        settings.roomWidth * 0.5f, normalizedX);
+                    settings.roomViewerZ = Mathf.Lerp(settings.roomDepth, 0f, normalizedY);
+                }
+                else
+                {
+                    settings.roomViewerZ = Mathf.Lerp(0f, settings.roomDepth, normalizedX);
+                    settings.roomViewerY = Mathf.Lerp(settings.roomHeight, 0f, normalizedY);
+                }
+            }
+
+            var observerColor = new Color(1f, 0.24f, 0.78f, 1f);
+            DrawSolidGuiRect(new Rect(observerPoint.x - 14f, observerPoint.y - 3f, 28f, 6f), observerColor);
+            DrawSolidGuiRect(new Rect(observerPoint.x - 3f, observerPoint.y - 14f, 6f, 28f), observerColor);
+            DrawSolidGuiRect(new Rect(observerPoint.x - 7f, observerPoint.y - 7f, 14f, 14f), Color.white);
+            DrawSolidGuiRect(new Rect(observerPoint.x - 4f, observerPoint.y - 4f, 8f, 8f), observerColor);
+            GUI.Label(new Rect(observerPoint.x + 16f, observerPoint.y - 12f, 130f, 24f),
+                "観測者（基準視点）", smallStyle);
+            GUI.Label(new Rect(available.x + 16f, available.yMax - 36f,
+                    available.width - 32f, 24f),
+                $"観測者  X {settings.roomViewerX:0.00} m / Y {settings.roomViewerY:0.00} m / Z {settings.roomViewerZ:0.00} m",
+                smallStyle);
+        }
+
+        private void DrawRoomOverviewEditor(Rect available)
+        {
+            var diagram = new Rect(available.x + 44f, available.y + 52f,
+                available.width - 88f, available.height - 104f);
+            var roomWidth = Mathf.Max(settings.roomWidth, 0.01f);
+            var roomHeight = Mathf.Max(settings.roomHeight, 0.01f);
+            var roomDepth = Mathf.Max(settings.roomDepth, 0.01f);
+            var worldCentre = new Vector3(0f, roomHeight * 0.5f, roomDepth * 0.5f);
+            var diagonal = Mathf.Sqrt(roomWidth * roomWidth + roomHeight * roomHeight
+                                                            + roomDepth * roomDepth);
+            var baseScale = Mathf.Min(diagram.width, diagram.height)
+                            / Mathf.Max(diagonal, 0.01f) * 0.82f * roomOverviewZoom;
+            var viewRotation = Quaternion.Euler(roomOverviewPitch, -roomOverviewYaw, 0f);
+
+            Vector2 Project(float x, float y, float z)
+            {
+                var view = viewRotation * (new Vector3(x, y, z) - worldCentre);
+                return diagram.center + new Vector2(view.x, -view.y) * baseScale;
+            }
+
+            var current = Event.current;
+            var mouse = GetLogicalMousePosition();
+            var resetView = new Rect(diagram.xMax - 116f, diagram.y + 6f, 108f, 28f);
+            if (GUI.Button(resetView, "3D視点をリセット"))
+            {
+                roomOverviewYaw = 35f;
+                roomOverviewPitch = 24f;
+                roomOverviewZoom = 1f;
+            }
+            if (current.type == EventType.ScrollWheel && diagram.Contains(mouse)
+                && !resetView.Contains(mouse))
+            {
+                roomOverviewZoom = Mathf.Clamp(roomOverviewZoom
+                                                * Mathf.Exp(-current.delta.y * 0.08f), 0.2f, 5f);
+                current.Use();
+            }
+            else if (current.type == EventType.MouseDown && current.button == 0
+                     && diagram.Contains(mouse) && !resetView.Contains(mouse))
+            {
+                roomOverviewOrbitDragging = true;
+                roomOverviewLastMouse = mouse;
+                current.Use();
+            }
+            else if (current.type == EventType.MouseDrag && roomOverviewOrbitDragging)
+            {
+                var delta = mouse - roomOverviewLastMouse;
+                roomOverviewLastMouse = mouse;
+                roomOverviewYaw = NormalizeControlPreviewRotation(roomOverviewYaw + delta.x * 0.3f);
+                roomOverviewPitch = Mathf.Clamp(roomOverviewPitch - delta.y * 0.3f, -89f, 89f);
+                current.Use();
+            }
+            if (current.rawType == EventType.MouseUp) roomOverviewOrbitDragging = false;
+
+            var x0 = -roomWidth * 0.5f;
+            var x1 = roomWidth * 0.5f;
+            var p000 = Project(x0, 0f, 0f);
+            var p100 = Project(x1, 0f, 0f);
+            var p001 = Project(x0, 0f, roomDepth);
+            var p101 = Project(x1, 0f, roomDepth);
+            var p010 = Project(x0, roomHeight, 0f);
+            var p110 = Project(x1, roomHeight, 0f);
+            var p011 = Project(x0, roomHeight, roomDepth);
+            var p111 = Project(x1, roomHeight, roomDepth);
+            var xAxis = new Color(1f, 0.12f, 0.12f, 1f);
+            var yAxis = new Color(0.12f, 1f, 0.22f, 1f);
+            var zAxis = new Color(0.12f, 0.38f, 1f, 1f);
+
+            DrawGuiSegment(p000, p100, xAxis, 3f);
+            DrawGuiSegment(p001, p101, xAxis, 3f);
+            DrawGuiSegment(p010, p110, xAxis, 3f);
+            DrawGuiSegment(p011, p111, xAxis, 3f);
+            DrawGuiSegment(p000, p010, yAxis, 3f);
+            DrawGuiSegment(p100, p110, yAxis, 3f);
+            DrawGuiSegment(p001, p011, yAxis, 3f);
+            DrawGuiSegment(p101, p111, yAxis, 3f);
+            DrawGuiSegment(p000, p001, zAxis, 3f);
+            DrawGuiSegment(p100, p101, zAxis, 3f);
+            DrawGuiSegment(p010, p011, zAxis, 3f);
+            DrawGuiSegment(p110, p111, zAxis, 3f);
+
+            var projectorWorld = new Vector3(settings.roomProjectorX,
+                settings.roomProjectorY, settings.roomProjectorZ);
+            var projectorPoint = Project(projectorWorld.x, projectorWorld.y,
+                projectorWorld.z);
+
+            // Draw the actual output rectangle back into the room. This is not
+            // a decorative camera pyramid: every cyan vertex is obtained with
+            // the same projector/lens/room intersection used by the renderer.
+            // It therefore makes an incorrect pose, FOV, enabled face, or lens
+            // correction immediately visible while calibrating.
+            const int projectionColumns = 13;
+            const int projectionRows = 9;
+            var projectionHits = new Vector3[projectionColumns, projectionRows];
+            var projectionFaces = new int[projectionColumns, projectionRows];
+            var projectionValid = new bool[projectionColumns, projectionRows];
+            var projectionAspect = GetProjectionAspect();
+            for (var column = 0; column < projectionColumns; column++)
+            {
+                for (var row = 0; row < projectionRows; row++)
+                {
+                    var outputPoint = new Vector2(column / (float)(projectionColumns - 1),
+                        row / (float)(projectionRows - 1));
+                    projectionValid[column, row] =
+                        DomeProjectionRenderer.TryGetRoomHitAtOutputPoint(settings,
+                            projectionAspect, outputPoint, out projectionFaces[column, row],
+                            out projectionHits[column, row]);
+                }
+            }
+
+            var projectionGrid = new Color(0.10f, 0.82f, 1f, 0.72f);
+            var projectionEdge = new Color(0.10f, 0.92f, 1f, 1f);
+            for (var column = 0; column < projectionColumns; column++)
+            {
+                for (var row = 0; row < projectionRows; row++)
+                {
+                    if (column + 1 < projectionColumns
+                        && projectionValid[column, row]
+                        && projectionValid[column + 1, row]
+                        && projectionFaces[column, row] == projectionFaces[column + 1, row])
+                    {
+                        var boundary = row == 0 || row == projectionRows - 1;
+                        DrawGuiSegment(Project(projectionHits[column, row].x,
+                                projectionHits[column, row].y, projectionHits[column, row].z),
+                            Project(projectionHits[column + 1, row].x,
+                                projectionHits[column + 1, row].y,
+                                projectionHits[column + 1, row].z),
+                            boundary ? projectionEdge : projectionGrid, boundary ? 2.5f : 1.2f);
+                    }
+                    if (row + 1 < projectionRows
+                        && projectionValid[column, row]
+                        && projectionValid[column, row + 1]
+                        && projectionFaces[column, row] == projectionFaces[column, row + 1])
+                    {
+                        var boundary = column == 0 || column == projectionColumns - 1;
+                        DrawGuiSegment(Project(projectionHits[column, row].x,
+                                projectionHits[column, row].y, projectionHits[column, row].z),
+                            Project(projectionHits[column, row + 1].x,
+                                projectionHits[column, row + 1].y,
+                                projectionHits[column, row + 1].z),
+                            boundary ? projectionEdge : projectionGrid, boundary ? 2.5f : 1.2f);
+                    }
+                }
+            }
+
+            var raySamples = new[]
+            {
+                new Vector2Int(0, 0),
+                new Vector2Int(projectionColumns - 1, 0),
+                new Vector2Int(0, projectionRows - 1),
+                new Vector2Int(projectionColumns - 1, projectionRows - 1),
+                new Vector2Int((projectionColumns - 1) / 2, (projectionRows - 1) / 2)
+            };
+            for (var index = 0; index < raySamples.Length; index++)
+            {
+                var sample = raySamples[index];
+                if (!projectionValid[sample.x, sample.y]) continue;
+                var hit = projectionHits[sample.x, sample.y];
+                DrawGuiSegment(projectorPoint, Project(hit.x, hit.y, hit.z),
+                    index == raySamples.Length - 1
+                        ? new Color(1f, 0.78f, 0.12f, 1f)
+                        : new Color(0.10f, 0.82f, 1f, 0.38f),
+                    index == raySamples.Length - 1 ? 3f : 1.2f);
+            }
+
+            if (roomWarpEditing)
+            {
+                foreach (var anchor in roomCalibrationAnchors)
+                {
+                    var anchorPoint = Project(anchor.worldPoint.x, anchor.worldPoint.y,
+                        anchor.worldPoint.z);
+                    var anchorColor = anchor.adjusted
+                        ? new Color(1f, 0.60f, 0.08f, 1f)
+                        : new Color(0.30f, 1f, 0.72f, 1f);
+                    DrawSolidGuiRect(new Rect(anchorPoint.x - 4f, anchorPoint.y - 4f,
+                        8f, 8f), anchorColor);
+                }
+            }
+
+            DrawSolidGuiRect(new Rect(projectorPoint.x - 8f, projectorPoint.y - 8f, 16f, 16f),
+                new Color(0.15f, 0.72f, 1f, 1f));
+            GUI.Label(new Rect(projectorPoint.x + 11f, projectorPoint.y - 12f, 110f, 24f),
+                "プロジェクター", smallStyle);
+
+            var observerPoint = Project(settings.roomViewerX, settings.roomViewerY,
+                settings.roomViewerZ);
+            var observerColor = new Color(1f, 0.24f, 0.78f, 1f);
+            DrawSolidGuiRect(new Rect(observerPoint.x - 14f, observerPoint.y - 3f, 28f, 6f), observerColor);
+            DrawSolidGuiRect(new Rect(observerPoint.x - 3f, observerPoint.y - 14f, 6f, 28f), observerColor);
+            DrawSolidGuiRect(new Rect(observerPoint.x - 7f, observerPoint.y - 7f, 14f, 14f), Color.white);
+            DrawSolidGuiRect(new Rect(observerPoint.x - 4f, observerPoint.y - 4f, 8f, 8f), observerColor);
+            GUI.Label(new Rect(observerPoint.x + 16f, observerPoint.y - 12f, 130f, 24f),
+                "観測者（基準視点）", smallStyle);
+            GUI.Label(new Rect(diagram.x + 8f, diagram.y + 8f,
+                    Mathf.Max(100f, diagram.width - 132f), 24f),
+                "水色：実際の投影範囲　黄：光軸　緑/橙：未調整/調整済み交点", smallStyle);
+            GUI.Label(new Rect(diagram.x + 8f, diagram.y + 30f,
+                    Mathf.Max(100f, diagram.width - 16f), 24f),
+                $"投影位置 ({settings.roomProjectorX:0.00}, {settings.roomProjectorY:0.00}, {settings.roomProjectorZ:0.00}) m　姿勢 Y{settings.roomProjectorYaw:0.0}° / P{settings.roomProjectorPitch:0.0}° / R{settings.roomProjectorRoll:0.0}°　水平画角 {settings.roomProjectorHorizontalFov:0}°",
+                smallStyle);
+            if (Mathf.Abs(settings.roomProjectorPitch) > 75f
+                || settings.roomProjectorHorizontalFov > 160f
+                || settings.roomProjectorY < 0.05f
+                || settings.roomProjectorY > settings.roomHeight - 0.05f)
+            {
+                var previousColor = GUI.color;
+                GUI.color = new Color(1f, 0.66f, 0.16f, 1f);
+                GUI.Label(new Rect(diagram.x + 8f, diagram.y + 52f,
+                        Mathf.Max(100f, diagram.width - 16f), 24f),
+                    "注意：姿勢・画角・高さが物理限界付近です。調整キャンセル後、概算値を見直してください。",
+                    smallStyle);
+                GUI.color = previousColor;
+            }
+            GUI.Label(new Rect(available.x + 16f, available.yMax - 36f,
+                    available.width - 32f, 24f),
+                $"空き領域ドラッグ：3D視点を回転 / ホイール：拡大縮小　　観測者 X {settings.roomViewerX:0.00} / Y {settings.roomViewerY:0.00} / Z {settings.roomViewerZ:0.00} m",
+                smallStyle);
+        }
+
+        private static void DrawGuiSegment(Vector2 start, Vector2 end, Color color, float thickness)
+        {
+            var delta = end - start;
+            var length = delta.magnitude;
+            if (length < 0.5f) return;
+            var savedMatrix = GUI.matrix;
+            var savedColor = GUI.color;
+            GUI.color = color;
+            var angle = Mathf.Atan2(delta.y, delta.x) * Mathf.Rad2Deg;
+            // Compose in logical GUI space. RotateAroundPivot pre-multiplies
+            // the Retina/UI scale and displaced diagonal segments away from
+            // their endpoints on high-DPI displays.
+            GUI.matrix = savedMatrix * Matrix4x4.TRS(
+                new Vector3(start.x, start.y, 0f), Quaternion.Euler(0f, 0f, angle), Vector3.one);
+            GUI.DrawTexture(new Rect(0f, -thickness * 0.5f, length, thickness),
+                Texture2D.whiteTexture);
+            GUI.matrix = savedMatrix;
+            GUI.color = savedColor;
+        }
+
+        private static void DrawSolidGuiRect(Rect rect, Color color)
+        {
+            var previousColor = GUI.color;
+            GUI.color = color;
+            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            GUI.color = previousColor;
+        }
+
+        private static void DrawGuiRectOutline(Rect rect, Color color, float thickness)
+        {
+            DrawSolidGuiRect(new Rect(rect.x, rect.y, rect.width, thickness), color);
+            DrawSolidGuiRect(new Rect(rect.x, rect.yMax - thickness, rect.width, thickness), color);
+            DrawSolidGuiRect(new Rect(rect.x, rect.y, thickness, rect.height), color);
+            DrawSolidGuiRect(new Rect(rect.xMax - thickness, rect.y, thickness, rect.height), color);
+        }
+
+        private static Rect DrawDraggableHandleWindow(int windowId, Rect rect)
+        {
+            return GUI.Window(windowId, rect,
+                _ => GUI.DragWindow(new Rect(0f, 0f, rect.width, rect.height)),
+                GUIContent.none, GUIStyle.none);
+        }
+
         private void HandlePanelScrollWheel()
         {
             if (!showControls || Event.current.type != EventType.ScrollWheel) return;
@@ -1873,7 +3088,8 @@ namespace DomeProjection
                     settings.showIdleScreen ? activeTabStyle : tabStyle, GUILayout.Height(30f)))
                 SetIdleScreenVisible(!settings.showIdleScreen);
             var guideVisible = settings.gridMode == 1;
-            if (GUILayout.Button(guideVisible ? "半球ガイド：表示中" : "半球ガイド：非表示",
+            var guideName = settings.projectionRegionMode == 2 ? "室内ガイド" : "半球ガイド";
+            if (GUILayout.Button(guideVisible ? guideName + "：表示中" : guideName + "：非表示",
                     guideVisible ? activeTabStyle : tabStyle, GUILayout.Height(30f)))
                 ToggleDomeGuide();
             EndSection();
@@ -2315,14 +3531,30 @@ namespace DomeProjection
         {
             BeginSection("投影範囲");
             GUILayout.BeginHorizontal();
-            DrawProjectionRegionModeButton(0, "中心設置・半球全体");
-            DrawProjectionRegionModeButton(1, "端置き・前方投影");
+            DrawProjectionRegionModeButton(0, "半球・中心");
+            DrawProjectionRegionModeButton(1, "半球・端置き");
+            DrawProjectionRegionModeButton(2, "室内コーナー");
             GUILayout.EndHorizontal();
 
             var offAxis = settings.projectionRegionMode == 1;
-            GUILayout.Label(offAxis
-                ? "プロジェクターをドーム端付近に置く想定です。各光線と球面の交点を計算し、上半球に当たる範囲を可能な限り表示します。"
-                : "プロジェクターを球の中心に置く通常の半球投影です。", smallStyle);
+            var room = settings.projectionRegionMode == 2;
+            GUILayout.Label(room
+                ? "前壁・側壁・天井への光線交点を求め、基準視点から継ぎ目なく見えるよう逆算します。寸法と位置の単位はmです。"
+                : offAxis
+                    ? "プロジェクターをドーム端付近に置く想定です。各光線と球面の交点を計算し、上半球に当たる範囲を可能な限り表示します。"
+                    : "プロジェクターを球の中心に置く通常の半球投影です。", smallStyle);
+
+            GUILayout.Space(4f);
+            GUILayout.Label("Control確認表示（Outputには影響しません）", smallStyle);
+            controlPreviewScale = FineSlider("確認倍率", controlPreviewScale,
+                0.01f, 1f, 0.05f, (controlPreviewScale * 100f).ToString("0") + "%", 1f);
+            controlPreviewYaw = FineSlider("確認・左右", controlPreviewYaw,
+                -75f, 75f, 1f, controlPreviewYaw.ToString("0°"), 0f);
+            controlPreviewPitch = FineSlider("確認・上下", controlPreviewPitch,
+                -75f, 75f, 1f, controlPreviewPitch.ToString("0°"), 0f);
+            controlPreviewRotation = FineSlider("確認・傾き", controlPreviewRotation,
+                -180f, 180f, 1f, controlPreviewRotation.ToString("0°"), 0f);
+            if (GUILayout.Button("Outputと同じ表示に戻す")) ResetControlPreview();
             if (offAxis)
             {
                 settings.domeFov = FineSlider("レンズ投影角", settings.domeFov,
@@ -2342,6 +3574,94 @@ namespace DomeProjection
                 GUILayout.Label("Rはドーム半径です。半円へ固定せず、設定した下端仰角以上の球面交点を可能な限り表示します。", smallStyle);
                 if (GUILayout.Button("端置き投影を既定へ")) settings.ResetOffAxisProjection();
             }
+            else if (room)
+            {
+                GUILayout.Label("室内寸法", smallStyle);
+                settings.roomWidth = FineSlider("幅 X", settings.roomWidth,
+                    1f, 30f, 0.05f, settings.roomWidth.ToString("0.00 m"), 5f);
+                settings.roomHeight = FineSlider("高さ Y", settings.roomHeight,
+                    1f, 10f, 0.05f, settings.roomHeight.ToString("0.00 m"), 2.5f);
+                settings.roomDepth = FineSlider("奥行き Z", settings.roomDepth,
+                    1f, 30f, 0.05f, settings.roomDepth.ToString("0.00 m"), 5f);
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("投影する角", rowLabelStyle, GUILayout.Width(82f));
+                if (GUILayout.Button("左隅", settings.roomCornerMode == 1 ? activeTabStyle : tabStyle))
+                {
+                    settings.roomCornerMode = 1;
+                    settings.roomUseLeftCorner = true;
+                    settings.roomProjectorYaw = settings.roomProjectorYaw > -1f
+                        ? -29f : settings.roomProjectorYaw;
+                }
+                if (GUILayout.Button("両隅", settings.roomCornerMode == 2 ? activeTabStyle : tabStyle))
+                {
+                    settings.roomCornerMode = 2;
+                    settings.roomUseLeftCorner = false;
+                    settings.roomProjectorYaw = 0f;
+                    if (settings.roomProjectorHorizontalFov < 100f)
+                        settings.roomProjectorHorizontalFov = 120f;
+                }
+                if (GUILayout.Button("右隅", settings.roomCornerMode == 0 ? activeTabStyle : tabStyle))
+                {
+                    settings.roomCornerMode = 0;
+                    settings.roomUseLeftCorner = false;
+                    settings.roomProjectorYaw = settings.roomProjectorYaw < 1f
+                        ? 29f : settings.roomProjectorYaw;
+                }
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("投影面", rowLabelStyle, GUILayout.Width(82f));
+                settings.roomShowFrontWall = GUILayout.Toggle(settings.roomShowFrontWall,
+                    "前壁", GUI.skin.button);
+                settings.roomShowSideWall = GUILayout.Toggle(settings.roomShowSideWall,
+                    "側壁", GUI.skin.button);
+                settings.roomShowCeiling = GUILayout.Toggle(settings.roomShowCeiling,
+                    "天井", GUI.skin.button);
+                settings.roomShowFloor = GUILayout.Toggle(settings.roomShowFloor,
+                    "床", GUI.skin.button);
+                GUILayout.EndHorizontal();
+
+                GUILayout.Label("プロジェクター位置", smallStyle);
+                settings.roomProjectorX = FineSlider("位置 X", settings.roomProjectorX,
+                    -15f, 15f, 0.01f, settings.roomProjectorX.ToString("0.00 m"), 0f);
+                settings.roomProjectorY = FineSlider("位置 Y", settings.roomProjectorY,
+                    -2f, 10f, 0.01f, settings.roomProjectorY.ToString("0.00 m"), 1.2f);
+                settings.roomProjectorZ = FineSlider("位置 Z", settings.roomProjectorZ,
+                    -5f, 30f, 0.01f, settings.roomProjectorZ.ToString("0.00 m"), 0.5f);
+                settings.roomProjectorYaw = FineSlider("光軸 Yaw", settings.roomProjectorYaw,
+                    -180f, 180f, 0.5f, settings.roomProjectorYaw.ToString("0.0°"), 29f);
+                settings.roomProjectorPitch = FineSlider("光軸 Pitch", settings.roomProjectorPitch,
+                    -89f, 89f, 0.5f, settings.roomProjectorPitch.ToString("0.0°"), 14f);
+                settings.roomProjectorRoll = FineSlider("光軸 Roll", settings.roomProjectorRoll,
+                    -180f, 180f, 0.5f, settings.roomProjectorRoll.ToString("0.0°"), 0f);
+                settings.roomProjectorHorizontalFov = FineSlider("水平画角", settings.roomProjectorHorizontalFov,
+                    10f, 170f, 1f, settings.roomProjectorHorizontalFov.ToString("0°"), 80f);
+                if (GUILayout.Button("前面4隅ワープを調整", activeTabStyle))
+                    StartRoomWarpEditing();
+                GUILayout.Label("前面の四隅だけを最終補正します。ドラッグしても位置・姿勢・画角や、ほかの頂点は変化しません。", smallStyle);
+
+                GUILayout.Label("基準視点（ここから見ると正しい形）", smallStyle);
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("確認表示", rowLabelStyle, GUILayout.Width(82f));
+                DrawRoomControlViewButton(0, "投影");
+                DrawRoomControlViewButton(1, "俯瞰3D");
+                DrawRoomControlViewButton(2, "上面");
+                DrawRoomControlViewButton(3, "側面");
+                GUILayout.EndHorizontal();
+                GUILayout.Label("俯瞰3Dは空き領域ドラッグで回転、ホイールで拡大縮小。上面／側面では観測者を移動できます。", smallStyle);
+                settings.roomViewerX = FineSlider("視点 X", settings.roomViewerX,
+                    -15f, 15f, 0.01f, settings.roomViewerX.ToString("0.00 m"), 0f);
+                settings.roomViewerY = FineSlider("視点 Y", settings.roomViewerY,
+                    -2f, 10f, 0.01f, settings.roomViewerY.ToString("0.00 m"), 1.6f);
+                settings.roomViewerZ = FineSlider("視点 Z", settings.roomViewerZ,
+                    -5f, 30f, 0.01f, settings.roomViewerZ.ToString("0.00 m"), 1.5f);
+                settings.roomGridSpacing = FineSlider("格子間隔", settings.roomGridSpacing,
+                    0.1f, 5f, 0.1f, settings.roomGridSpacing.ToString("0.0 m"), 0.5f);
+                GUILayout.Label("辺の色：X方向＝赤 / Y方向＝緑 / Z方向＝青", smallStyle);
+                GUILayout.Label("座標は部屋中央がX=0、床がY=0、後方がZ=0、前壁がZ=奥行きです。", smallStyle);
+                if (GUILayout.Button("室内コーナー投影を既定へ")) settings.ResetRoomProjection();
+            }
             else
             {
                 settings.domeFov = FineSlider("ドーム画角", settings.domeFov,
@@ -2359,11 +3679,78 @@ namespace DomeProjection
             if (settings.projectionRegionMode == mode) return;
             settings.projectionRegionMode = mode;
             if (mode == 1) settings.ResetOffAxisProjection();
+            else if (mode == 2) settings.ResetRoomProjection();
             else
             {
                 settings.domeFov = 180f;
                 settings.ResetOutputCircle();
             }
+        }
+
+        private void DrawRoomControlViewButton(int mode, string label)
+        {
+            if (!GUILayout.Button(label,
+                    settings.roomControlViewMode == mode ? activeTabStyle : tabStyle,
+                    GUILayout.ExpandWidth(true))) return;
+            settings.roomControlViewMode = mode;
+            roomWarpEditing = false;
+        }
+
+        private void DrawRoomWarpReferenceButton(int face, string label)
+        {
+            if (!GUILayout.Button(label,
+                    settings.roomWarpReferenceFace == face ? activeTabStyle : tabStyle,
+                    GUILayout.ExpandWidth(true))) return;
+            if (settings.roomWarpReferenceFace == face) return;
+            settings.roomWarpReferenceFace = face;
+            if (face == 0) settings.roomShowFrontWall = true;
+            else if (face == 1) settings.roomShowCeiling = true;
+            else if (face == 2) settings.roomShowFloor = true;
+            else settings.roomShowSideWall = true;
+            settings.ResetRoomWarp();
+            roomWarpAutoFitPending = true;
+        }
+
+        private void StartRoomWarpEditing()
+        {
+            settings.roomControlViewMode = 0;
+            roomCalibrationStartProfile = LensCalibrationProfile.Capture(
+                "__room_calibration_start__", settings);
+            // Four-point adjustment is deliberately independent from the
+            // physical projector model. Moving one corner must never re-fit
+            // position, rotation or FOV and therefore cannot move a corner
+            // that the operator has already aligned.
+            settings.roomWarpReferenceFace = 0;
+            roomWarpEditing = true;
+            roomWarpAutoFitPending = true;
+            roomCalibrationViewDragging = false;
+            roomCalibrationShowOverview = false;
+            showControls = false;
+            status = "前面の四隅を実際の壁の角へ合わせてください";
+        }
+
+        private void FinishRoomWarpEditing()
+        {
+            roomWarpEditing = false;
+            roomCalibrationViewDragging = false;
+            roomCalibrationStartProfile = null;
+            showControls = true;
+            SaveSettings();
+            status = "前面4隅ワープを保存しました";
+        }
+
+        private void CancelRoomWarpEditing()
+        {
+            if (roomCalibrationStartProfile != null)
+                roomCalibrationStartProfile.ApplyTo(settings);
+            roomCalibrationStartProfile = null;
+            roomCalibrationAnchors.Clear();
+            roomWarpEditing = false;
+            roomCalibrationViewDragging = false;
+            roomCalibrationShowOverview = false;
+            showControls = true;
+            ResetControlPreview();
+            status = "前面4隅ワープをキャンセルし、開始前の設定へ戻しました";
         }
 
         private void DrawCalibrationPanel()
@@ -2375,31 +3762,39 @@ namespace DomeProjection
                 settings.gridMode = (settings.gridMode + 1) % 3;
             GUILayout.EndHorizontal();
 
-            GUILayout.BeginHorizontal(GUILayout.Height(28f));
-            GUILayout.Label("グリッド間隔", rowLabelStyle, GUILayout.Width(82f));
-            if (GUILayout.Button(settings.gridStepDegrees.ToString("0°"), GUILayout.Width(54f)))
-                settings.gridStepDegrees = NextGridStep(settings.gridStepDegrees);
-            GUILayout.Label("押すたびに 1° / 2° / 5° / 10° / 15°", smallStyle,
-                GUILayout.ExpandWidth(true));
-            GUILayout.EndHorizontal();
+            if (settings.projectionRegionMode == 2)
+                GUILayout.Label("室内グリッド間隔は「配置」タブの室内コーナー設定で変更できます。", smallStyle);
+            else
+            {
+                GUILayout.BeginHorizontal(GUILayout.Height(28f));
+                GUILayout.Label("グリッド間隔", rowLabelStyle, GUILayout.Width(82f));
+                if (GUILayout.Button(settings.gridStepDegrees.ToString("0°"), GUILayout.Width(54f)))
+                    settings.gridStepDegrees = NextGridStep(settings.gridStepDegrees);
+                GUILayout.Label("押すたびに 1° / 2° / 5° / 10° / 15°", smallStyle,
+                    GUILayout.ExpandWidth(true));
+                GUILayout.EndHorizontal();
+            }
             settings.gridOpacity = FineSlider("グリッド濃さ", settings.gridOpacity, 0.15f, 1f,
                 0.05f, settings.gridOpacity.ToString("0.00"), 1f);
             settings.gridLineWidth = FineSlider("線の太さ", settings.gridLineWidth, 0.25f, 1.5f, 0.05f, settings.gridLineWidth.ToString("0.00"), 0.65f);
             settings.showOrientationMarkers = GUILayout.Toggle(settings.showOrientationMarkers, "方位色マーカー（上:赤 右:緑 下:青 左:黄）");
             EndSection();
 
-            BeginSection("出力円");
-            GUILayout.Label("画面外へはみ出す位置・大きさまで調整できます。", smallStyle);
+            BeginSection(settings.projectionRegionMode == 2 ? "出力範囲" : "出力円");
+            GUILayout.Label(settings.projectionRegionMode == 2
+                ? "室内モードでは円形に切らず、プロジェクターの長方形画面全体を使います。位置・倍率・レンズ補正は共通です。"
+                : "画面外へはみ出す位置・大きさまで調整できます。", smallStyle);
             settings.centerX = FineSlider("中心 X", settings.centerX, -1f, 2f, 0.001f, settings.centerX.ToString("0.000"), 0.5f);
             settings.centerY = FineSlider("中心 Y", settings.centerY, -1f, 2f, 0.001f, settings.centerY.ToString("0.000"), 0.5f);
             settings.radius = FineSlider("円半径", settings.radius, 0.05f, 3f, 0.001f, settings.radius.ToString("0.000"), 0.485f);
             settings.ellipseX = FineSlider("横倍率", settings.ellipseX, 0.1f, 3f, 0.001f, settings.ellipseX.ToString("0.000"), 1f);
             settings.ellipseY = FineSlider("縦倍率", settings.ellipseY, 0.1f, 3f, 0.001f, settings.ellipseY.ToString("0.000"), 1f);
             settings.outputRotation = FineSlider("出力回転", settings.outputRotation, -180f, 180f, 0.1f, settings.outputRotation.ToString("0.0°"), 0f);
-            if (GUILayout.Button("出力円をリセット"))
+            if (GUILayout.Button(settings.projectionRegionMode == 2 ? "出力範囲をリセット" : "出力円をリセット"))
             {
                 settings.ResetOutputCircle();
                 if (settings.projectionRegionMode == 1) settings.radius = 1f;
+                else if (settings.projectionRegionMode == 2) settings.radius = 0.5f;
             }
             EndSection();
         }
@@ -4107,9 +5502,10 @@ namespace DomeProjection
                 GUILayout.Label("既定画像が未選択の場合は黒を表示します。", smallStyle);
 
             GUILayout.Space(8f);
-            GUILayout.Label("半球ガイド（現在の表示内容に重ねる）");
+            var guideName = settings.projectionRegionMode == 2 ? "室内ガイド" : "半球ガイド";
+            GUILayout.Label(guideName + "（現在の表示内容に重ねる）");
             var guideVisible = settings.gridMode == 1;
-            if (GUILayout.Button(guideVisible ? "半球ガイド：表示中" : "半球ガイド：非表示",
+            if (GUILayout.Button(guideVisible ? guideName + "：表示中" : guideName + "：非表示",
                     guideVisible ? activeTabStyle : tabStyle))
                 ToggleDomeGuide();
             GUILayout.Label("待機画像・動画・画像・外部ウィンドウのどの表示にも重ねられます。", smallStyle);
@@ -4239,12 +5635,20 @@ namespace DomeProjection
 #endif
         }
 
-        private static void ConfigureProjectorDisplay()
+        private IEnumerator ConfigureProjectorDisplay()
         {
-            // Never reuse a window size saved by a permission/setup launch.
-            // Output always starts at the selected monitor's physical size.
-            var width = Display.main != null ? Display.main.systemWidth : 0;
-            var height = Display.main != null ? Display.main.systemHeight : 0;
+            // -monitor is 1-based. Display.main always describes the OS main
+            // monitor on macOS, even when Unity has placed this player on the
+            // second monitor. Using it caused a 3024x1964 backbuffer to be
+            // letterboxed inside a 3840x2160 projector screen.
+            yield return null;
+            var requestedDisplay = GetRequestedMonitorIndex();
+            var displays = Display.displays;
+            var selectedDisplay = displays != null && displays.Length > 0
+                ? displays[Mathf.Clamp(requestedDisplay, 0, displays.Length - 1)]
+                : Display.main;
+            var width = selectedDisplay != null ? selectedDisplay.systemWidth : 0;
+            var height = selectedDisplay != null ? selectedDisplay.systemHeight : 0;
             if (width < 640 || height < 360)
             {
                 var current = Screen.currentResolution;
@@ -4253,7 +5657,32 @@ namespace DomeProjection
             }
 
             Screen.SetResolution(width, height, FullScreenMode.FullScreenWindow);
-            UnityEngine.Debug.Log($"Projector output configured at {width} x {height}");
+            // Apply again after the native fullscreen window has reached the
+            // requested monitor, then force the camera to occupy the complete
+            // drawable area regardless of the Control window's aspect ratio.
+            yield return null;
+            yield return new WaitForEndOfFrame();
+            Screen.SetResolution(width, height, FullScreenMode.FullScreenWindow);
+            if (outputCamera != null)
+            {
+                outputCamera.rect = new Rect(0f, 0f, 1f, 1f);
+                outputCamera.ResetAspect();
+            }
+            UnityEngine.Debug.Log($"Projector output configured on monitor {requestedDisplay + 1} "
+                                  + $"at {width} x {height}; drawable {Screen.width} x {Screen.height}");
+        }
+
+        private static int GetRequestedMonitorIndex()
+        {
+            var arguments = Environment.GetCommandLineArgs();
+            for (var index = 0; index < arguments.Length - 1; index++)
+            {
+                if (!string.Equals(arguments[index], "-monitor",
+                        StringComparison.OrdinalIgnoreCase)) continue;
+                if (int.TryParse(arguments[index + 1], out var monitor))
+                    return Mathf.Max(0, monitor - 1);
+            }
+            return 0;
         }
 
         private float Slider(string label, float value, float min, float max, string display,
@@ -4400,6 +5829,22 @@ namespace DomeProjection
                     break;
                 case KeyCode.H:
                     showControls = !showControls;
+                    current.Use();
+                    break;
+                case KeyCode.W:
+                    if (settings.projectionRegionMode != 2) break;
+                    if (roomWarpEditing) FinishRoomWarpEditing();
+                    else StartRoomWarpEditing();
+                    current.Use();
+                    break;
+                case KeyCode.V:
+                    if (settings.projectionRegionMode != 2 || !roomWarpEditing) break;
+                    roomCalibrationShowOverview = !roomCalibrationShowOverview;
+                    current.Use();
+                    break;
+                case KeyCode.C:
+                    if (settings.projectionRegionMode != 2 || !roomWarpEditing) break;
+                    CancelRoomWarpEditing();
                     current.Use();
                     break;
                 case KeyCode.F:

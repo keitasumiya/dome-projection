@@ -42,8 +42,10 @@ namespace DomeProjection
         private static UdpClient stopReceiver;
         private static DateTime lastHeartbeatUtc = DateTime.MinValue;
         private static bool outputHasCapturePermission;
+        private static float outputAspect;
 
         public static bool OutputHasCapturePermission => outputHasCapturePermission;
+        public static float OutputAspect => outputAspect;
 
         private static string SharedDirectory
         {
@@ -63,6 +65,7 @@ namespace DomeProjection
         {
             Shutdown();
             outputHasCapturePermission = false;
+            outputAspect = 0f;
             stateSender = new UdpClient();
             stopSender = new UdpClient();
             heartbeatReceiver = BindReceiver(HeartbeatPort);
@@ -120,13 +123,17 @@ namespace DomeProjection
             catch { return false; }
         }
 
-        public static void WriteHeartbeat(bool hasCapturePermission)
+        public static void WriteHeartbeat(bool hasCapturePermission, float aspect)
         {
             if (heartbeatSender == null) return;
             try
             {
-                heartbeatSender.Send(new[] { (byte)1, hasCapturePermission ? (byte)1 : (byte)0 },
-                    2, LoopbackHeartbeat);
+                var bytes = new byte[6];
+                bytes[0] = 1;
+                bytes[1] = hasCapturePermission ? (byte)1 : (byte)0;
+                var aspectBytes = BitConverter.GetBytes(aspect);
+                Buffer.BlockCopy(aspectBytes, 0, bytes, 2, 4);
+                heartbeatSender.Send(bytes, bytes.Length, LoopbackHeartbeat);
             }
             catch { }
         }
@@ -142,6 +149,13 @@ namespace DomeProjection
                         IPEndPoint sender = null;
                         var bytes = heartbeatReceiver.Receive(ref sender);
                         if (bytes.Length > 1) outputHasCapturePermission = bytes[1] != 0;
+                        if (bytes.Length >= 6)
+                        {
+                            var candidateAspect = BitConverter.ToSingle(bytes, 2);
+                            if (!float.IsNaN(candidateAspect) && !float.IsInfinity(candidateAspect)
+                                && candidateAspect > 0.1f && candidateAspect < 10f)
+                                outputAspect = candidateAspect;
+                        }
                         lastHeartbeatUtc = DateTime.UtcNow;
                     }
                 }

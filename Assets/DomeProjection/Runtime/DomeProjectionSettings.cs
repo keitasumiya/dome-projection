@@ -6,7 +6,7 @@ namespace DomeProjection
     [Serializable]
     public sealed class LensCalibrationProfile
     {
-        public int profileVersion = 5;
+        public int profileVersion = 10;
         public string displayName = string.Empty;
         public string savedUtc = string.Empty;
 
@@ -19,6 +19,38 @@ namespace DomeProjection
         public float offAxisProjectorHeight;
         public float offAxisAimElevation = 15f;
         public float offAxisMinimumElevation = -20f;
+        public float roomWidth = 5f;
+        public float roomHeight = 2.5f;
+        public float roomDepth = 5f;
+        public int roomCornerMode;
+        // Kept in JSON for profiles written by version 6.
+        public bool roomUseLeftCorner;
+        public bool roomShowFrontWall = true;
+        public bool roomShowSideWall = true;
+        public bool roomShowCeiling = true;
+        public bool roomShowFloor = true;
+        public float roomProjectorX;
+        public float roomProjectorY = 1.2f;
+        public float roomProjectorZ = 0.5f;
+        public float roomProjectorYaw = 29f;
+        public float roomProjectorPitch = 14f;
+        public float roomProjectorRoll;
+        public float roomProjectorHorizontalFov = 80f;
+        public float roomViewerX;
+        public float roomViewerY = 1.6f;
+        public float roomViewerZ = 1.5f;
+        public float roomGridSpacing = 0.5f;
+        // Face whose four physical corners anchor room warp calibration.
+        // 0 = front, 1 = ceiling, 2 = floor, 3 = left wall, 4 = right wall.
+        public int roomWarpReferenceFace;
+        public float roomWarpTopLeftX;
+        public float roomWarpTopLeftY;
+        public float roomWarpTopRightX;
+        public float roomWarpTopRightY;
+        public float roomWarpBottomLeftX;
+        public float roomWarpBottomLeftY;
+        public float roomWarpBottomRightX;
+        public float roomWarpBottomRightY;
         public float centerX = 0.5f;
         public float centerY = 0.5f;
         public float radius = 0.485f;
@@ -47,6 +79,35 @@ namespace DomeProjection
                 offAxisProjectorHeight = settings.offAxisProjectorHeight,
                 offAxisAimElevation = settings.offAxisAimElevation,
                 offAxisMinimumElevation = settings.offAxisMinimumElevation,
+                roomWidth = settings.roomWidth,
+                roomHeight = settings.roomHeight,
+                roomDepth = settings.roomDepth,
+                roomCornerMode = settings.roomCornerMode,
+                roomUseLeftCorner = settings.roomUseLeftCorner,
+                roomShowFrontWall = settings.roomShowFrontWall,
+                roomShowSideWall = settings.roomShowSideWall,
+                roomShowCeiling = settings.roomShowCeiling,
+                roomShowFloor = settings.roomShowFloor,
+                roomProjectorX = settings.roomProjectorX,
+                roomProjectorY = settings.roomProjectorY,
+                roomProjectorZ = settings.roomProjectorZ,
+                roomProjectorYaw = settings.roomProjectorYaw,
+                roomProjectorPitch = settings.roomProjectorPitch,
+                roomProjectorRoll = settings.roomProjectorRoll,
+                roomProjectorHorizontalFov = settings.roomProjectorHorizontalFov,
+                roomViewerX = settings.roomViewerX,
+                roomViewerY = settings.roomViewerY,
+                roomViewerZ = settings.roomViewerZ,
+                roomGridSpacing = settings.roomGridSpacing,
+                roomWarpReferenceFace = settings.roomWarpReferenceFace,
+                roomWarpTopLeftX = settings.roomWarpTopLeftX,
+                roomWarpTopLeftY = settings.roomWarpTopLeftY,
+                roomWarpTopRightX = settings.roomWarpTopRightX,
+                roomWarpTopRightY = settings.roomWarpTopRightY,
+                roomWarpBottomLeftX = settings.roomWarpBottomLeftX,
+                roomWarpBottomLeftY = settings.roomWarpBottomLeftY,
+                roomWarpBottomRightX = settings.roomWarpBottomRightX,
+                roomWarpBottomRightY = settings.roomWarpBottomRightY,
                 centerX = settings.centerX,
                 centerY = settings.centerY,
                 radius = settings.radius,
@@ -73,6 +134,46 @@ namespace DomeProjection
             settings.offAxisProjectorHeight = offAxisProjectorHeight;
             settings.offAxisAimElevation = offAxisAimElevation;
             settings.offAxisMinimumElevation = offAxisMinimumElevation;
+            settings.roomWidth = roomWidth;
+            settings.roomHeight = roomHeight;
+            settings.roomDepth = roomDepth;
+            settings.roomCornerMode = profileVersion >= 7
+                ? roomCornerMode
+                : roomUseLeftCorner ? 1 : 0;
+            settings.roomUseLeftCorner = settings.roomCornerMode == 1;
+            settings.roomShowFrontWall = roomShowFrontWall;
+            settings.roomShowSideWall = roomShowSideWall;
+            settings.roomShowCeiling = roomShowCeiling;
+            settings.roomShowFloor = profileVersion < 8 || roomShowFloor;
+            settings.roomProjectorX = roomProjectorX;
+            settings.roomProjectorY = roomProjectorY;
+            settings.roomProjectorZ = roomProjectorZ;
+            settings.roomProjectorYaw = roomProjectorYaw;
+            settings.roomProjectorPitch = roomProjectorPitch;
+            settings.roomProjectorRoll = roomProjectorRoll;
+            settings.roomProjectorHorizontalFov = roomProjectorHorizontalFov;
+            settings.roomViewerX = roomViewerX;
+            settings.roomViewerY = roomViewerY;
+            settings.roomViewerZ = roomViewerZ;
+            settings.roomGridSpacing = roomGridSpacing;
+            settings.roomWarpReferenceFace = profileVersion >= 10
+                ? roomWarpReferenceFace
+                : 0;
+            if (profileVersion >= 9)
+            {
+                settings.roomWarpTopLeftX = roomWarpTopLeftX;
+                settings.roomWarpTopLeftY = roomWarpTopLeftY;
+                settings.roomWarpTopRightX = roomWarpTopRightX;
+                settings.roomWarpTopRightY = roomWarpTopRightY;
+                settings.roomWarpBottomLeftX = roomWarpBottomLeftX;
+                settings.roomWarpBottomLeftY = roomWarpBottomLeftY;
+                settings.roomWarpBottomRightX = roomWarpBottomRightX;
+                settings.roomWarpBottomRightY = roomWarpBottomRightY;
+            }
+            else
+            {
+                settings.ResetRoomWarp();
+            }
             settings.centerX = centerX;
             settings.centerY = centerY;
             settings.radius = radius;
@@ -101,6 +202,8 @@ namespace DomeProjection
             }
             if (projectionRegionMode == 1 && profileVersion < 5)
                 settings.offAxisMinimumElevation = -20f;
+            if (projectionRegionMode == 2 && profileVersion < 6)
+                settings.ResetRoomProjection();
             settings.Clamp();
         }
     }
@@ -108,7 +211,7 @@ namespace DomeProjection
     [Serializable]
     public sealed class DomeProjectionSettings
     {
-        public int settingsVersion = 21;
+        public int settingsVersion = 29;
         public string videoPath = string.Empty;
 
         // Input source. 0 = video/image file, 1 = captured desktop window.
@@ -165,9 +268,8 @@ namespace DomeProjection
         public float pitch = 180f;
         public float roll;
         // Projection geometry. 0 = projector at the sphere centre; 1 = an
-        // off-axis projector near the rear rim, aimed across the dome. In the
-        // latter mode each projector ray is intersected with the unit sphere,
-        // so the visible area is not forcibly clipped to an exact quarter.
+        // off-axis projector near the rear rim, aimed across the dome; 2 = a
+        // rectangular room corner made of a front wall, side wall and ceiling.
         public int projectionRegionMode;
         public float domeFov = 180f;
         // Off-axis position is expressed in dome-radius units. The default is
@@ -179,6 +281,52 @@ namespace DomeProjection
         // of -20 degrees corresponds to the lower extent of a 220-degree
         // zenith-centred projection.
         public float offAxisMinimumElevation = -20f;
+
+        // Rectangular-room coordinates are metres. X is centred across the
+        // room, Y rises from the floor, and Z runs from the rear toward the
+        // front wall. Rays hit the nearest enabled surface, then the texture
+        // direction is calculated from the reference viewer position.
+        public float roomWidth = 5f;
+        public float roomHeight = 2.5f;
+        public float roomDepth = 5f;
+        // 0 = right corner, 1 = left corner, 2 = both front corners.
+        public int roomCornerMode;
+        // Legacy version-22 compatibility; roomCornerMode is authoritative.
+        public bool roomUseLeftCorner;
+        public bool roomShowFrontWall = true;
+        public bool roomShowSideWall = true;
+        public bool roomShowCeiling = true;
+        public bool roomShowFloor = true;
+        public float roomProjectorX;
+        public float roomProjectorY = 1.2f;
+        public float roomProjectorZ = 0.5f;
+        public float roomProjectorYaw = 29f;
+        public float roomProjectorPitch = 14f;
+        public float roomProjectorRoll;
+        public float roomProjectorHorizontalFov = 80f;
+        public float roomViewerX;
+        public float roomViewerY = 1.6f;
+        public float roomViewerZ = 1.5f;
+        public float roomGridSpacing = 0.5f;
+        // Surface used as the primary four-corner calibration anchor.
+        // 0 = front, 1 = ceiling, 2 = floor, 3 = left wall, 4 = right wall.
+        public int roomWarpReferenceFace;
+        // Normalized offsets applied to the four projected corners of the
+        // selected reference face. Zero leaves the calculated projector
+        // geometry unchanged; dragging a handle moves that face corner only.
+        public float roomWarpTopLeftX;
+        public float roomWarpTopLeftY;
+        public float roomWarpTopRightX;
+        public float roomWarpTopRightY;
+        public float roomWarpBottomLeftX;
+        public float roomWarpBottomLeftY;
+        public float roomWarpBottomRightX;
+        public float roomWarpBottomRightY;
+        // Control-only room editor: 0 = projected result, 1 = top view,
+        // 2 = side view. Output ignores this field.
+        // 0: projected result, 1: third-person overview, 2: top, 3: side.
+        // This is only a Control-app aid and is never sent to the projector.
+        public int roomControlViewMode;
 
         // Output circle. Center is in normalized output coordinates; radius is
         // relative to output height, so 0.5 gives a height-filling circle.
@@ -279,6 +427,40 @@ namespace DomeProjection
             radius = 1f;
             ellipseX = ellipseY = 1f;
             outputRotation = 0f;
+        }
+
+        public void ResetRoomProjection()
+        {
+            roomWidth = roomDepth = 5f;
+            roomHeight = 2.5f;
+            roomCornerMode = 0;
+            roomUseLeftCorner = false;
+            roomShowFrontWall = roomShowSideWall = roomShowCeiling = roomShowFloor = true;
+            roomProjectorX = 0f;
+            roomProjectorY = 1.2f;
+            roomProjectorZ = 0.5f;
+            roomProjectorYaw = 29f;
+            roomProjectorPitch = 14f;
+            roomProjectorRoll = 0f;
+            roomProjectorHorizontalFov = 80f;
+            roomViewerX = 0f;
+            roomViewerY = 1.6f;
+            roomViewerZ = 1.5f;
+            roomGridSpacing = 0.5f;
+            roomWarpReferenceFace = 0;
+            ResetRoomWarp();
+            centerX = centerY = 0.5f;
+            radius = 0.5f;
+            ellipseX = ellipseY = 1f;
+            outputRotation = 0f;
+        }
+
+        public void ResetRoomWarp()
+        {
+            roomWarpTopLeftX = roomWarpTopLeftY = 0f;
+            roomWarpTopRightX = roomWarpTopRightY = 0f;
+            roomWarpBottomLeftX = roomWarpBottomLeftY = 0f;
+            roomWarpBottomRightX = roomWarpBottomRightY = 0f;
         }
 
         public void ResetFlatPlacement()
@@ -460,7 +642,47 @@ namespace DomeProjection
             if (settingsVersion < 21)
                 offAxisMinimumElevation = -20f;
 
-            settingsVersion = 21;
+            if (settingsVersion < 22)
+            {
+                // Version 22 introduces a separately selected room-corner
+                // geometry. Existing dome setups remain untouched.
+                if (projectionRegionMode == 2) ResetRoomProjection();
+            }
+
+            if (settingsVersion < 23)
+            {
+                roomCornerMode = roomUseLeftCorner ? 1 : 0;
+            }
+
+            if (settingsVersion < 24)
+            {
+                roomShowFloor = true;
+                ResetRoomWarp();
+            }
+
+            if (settingsVersion < 25)
+                roomControlViewMode = 0;
+
+            if (settingsVersion < 26)
+            {
+                // Versions 24-25 warped the four corners of the complete
+                // output raster. Version 26 instead calibrates the projected
+                // front-wall corners, so the old values are not compatible.
+                ResetRoomWarp();
+            }
+
+            if (settingsVersion < 27)
+                roomWarpReferenceFace = 0;
+
+            if (settingsVersion < 28)
+            {
+                // Version 28 briefly used a global multi-point solve. Keep the
+                // established front-face warp when upgrading instead of
+                // silently discarding an operator's completed calibration.
+                roomWarpReferenceFace = 0;
+            }
+
+            settingsVersion = 29;
         }
 
         public void Clamp()
@@ -468,12 +690,41 @@ namespace DomeProjection
             yaw = Mathf.Repeat(yaw + 180f, 360f) - 180f;
             pitch = Mathf.Clamp(pitch, -180f, 180f);
             roll = Mathf.Clamp(roll, -180f, 180f);
-            projectionRegionMode = Mathf.Clamp(projectionRegionMode, 0, 1);
+            projectionRegionMode = Mathf.Clamp(projectionRegionMode, 0, 2);
             domeFov = Mathf.Clamp(domeFov, 30f, 360f);
             offAxisProjectorDistance = Mathf.Clamp(offAxisProjectorDistance, 0f, 2f);
             offAxisProjectorHeight = Mathf.Clamp(offAxisProjectorHeight, -1.5f, 1.5f);
             offAxisAimElevation = Mathf.Clamp(offAxisAimElevation, -90f, 90f);
             offAxisMinimumElevation = Mathf.Clamp(offAxisMinimumElevation, -90f, 0f);
+            roomWidth = Mathf.Clamp(roomWidth, 1f, 30f);
+            roomHeight = Mathf.Clamp(roomHeight, 1f, 10f);
+            roomDepth = Mathf.Clamp(roomDepth, 1f, 30f);
+            roomCornerMode = Mathf.Clamp(roomCornerMode, 0, 2);
+            roomUseLeftCorner = roomCornerMode == 1;
+            roomProjectorX = Mathf.Clamp(roomProjectorX, -30f, 30f);
+            roomProjectorY = Mathf.Clamp(roomProjectorY, -2f, 12f);
+            roomProjectorZ = Mathf.Clamp(roomProjectorZ, -5f, 35f);
+            roomProjectorYaw = Mathf.Clamp(roomProjectorYaw, -180f, 180f);
+            roomProjectorPitch = Mathf.Clamp(roomProjectorPitch, -89f, 89f);
+            roomProjectorRoll = Mathf.Clamp(roomProjectorRoll, -180f, 180f);
+            roomProjectorHorizontalFov = Mathf.Clamp(roomProjectorHorizontalFov, 10f, 170f);
+            roomViewerX = Mathf.Clamp(roomViewerX, -30f, 30f);
+            roomViewerY = Mathf.Clamp(roomViewerY, -2f, 12f);
+            roomViewerZ = Mathf.Clamp(roomViewerZ, -5f, 35f);
+            roomGridSpacing = Mathf.Clamp(roomGridSpacing, 0.1f, 5f);
+            // Final room correction is intentionally a single stable front
+            // quad. Hidden ceiling/side reference modes made the same saved
+            // offsets mean different things and are no longer supported.
+            roomWarpReferenceFace = 0;
+            roomWarpTopLeftX = Mathf.Clamp(roomWarpTopLeftX, -2f, 2f);
+            roomWarpTopLeftY = Mathf.Clamp(roomWarpTopLeftY, -2f, 2f);
+            roomWarpTopRightX = Mathf.Clamp(roomWarpTopRightX, -2f, 2f);
+            roomWarpTopRightY = Mathf.Clamp(roomWarpTopRightY, -2f, 2f);
+            roomWarpBottomLeftX = Mathf.Clamp(roomWarpBottomLeftX, -2f, 2f);
+            roomWarpBottomLeftY = Mathf.Clamp(roomWarpBottomLeftY, -2f, 2f);
+            roomWarpBottomRightX = Mathf.Clamp(roomWarpBottomRightX, -2f, 2f);
+            roomWarpBottomRightY = Mathf.Clamp(roomWarpBottomRightY, -2f, 2f);
+            roomControlViewMode = Mathf.Clamp(roomControlViewMode, 0, 3);
             // Oversized and off-screen circles are useful when only the front
             // portion of the physical dome is used as a large window.
             centerX = Mathf.Clamp(centerX, -1f, 2f);
