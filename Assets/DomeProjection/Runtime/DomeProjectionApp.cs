@@ -196,6 +196,14 @@ namespace DomeProjection
         private float roomOverviewZoom = 1f;
         private bool roomOverviewOrbitDragging;
         private Vector2 roomOverviewLastMouse;
+        private RoomContentPreviewRenderer roomContentPreviewRenderer;
+        private bool roomOverviewShowContent = true;
+        private float roomContentPreviewYaw;
+        private float roomContentPreviewPitch;
+        private float roomContentPreviewFov = 95f;
+        private bool roomContentPreviewDragging;
+        private Vector2 roomContentPreviewLastMouse;
+        private bool roomContentPreviewShowGuide;
 
         private sealed class RoomCalibrationAnchor
         {
@@ -390,6 +398,8 @@ namespace DomeProjection
 
         private void OnDestroy()
         {
+            roomContentPreviewRenderer?.Dispose();
+            roomContentPreviewRenderer = null;
             if (panelTexture != null) Destroy(panelTexture);
             if (sliderTexture != null) Destroy(sliderTexture);
             if (sliderThumbTexture != null) Destroy(sliderThumbTexture);
@@ -564,6 +574,8 @@ namespace DomeProjection
             previewRenderer.IdleImageSource = idleImage;
             previewRenderer.WindowBackgroundImageSource = windowBackgroundImage;
             previewRenderer.WindowSource = windowCapture;
+            if (!projectorMode)
+                roomContentPreviewRenderer = new RoomContentPreviewRenderer(transform);
         }
 
         private void OnMediaPrepared()
@@ -2655,7 +2667,9 @@ namespace DomeProjection
             GUI.Label(new Rect(available.x + 16f, available.y + 12f,
                     available.width - 32f, 28f),
                 overview
-                    ? "第三者視点・俯瞰3D　空き領域をドラッグして視点回転 / ホイールで拡大縮小"
+                    ? roomOverviewShowContent
+                        ? "観測者プレビュー　ドラッグで見回す / ホイールで視野角を変更"
+                        : "第三者視点・俯瞰3D　空き領域をドラッグして視点回転 / ホイールで拡大縮小"
                     : topView
                         ? "第三者視点・上面図　観測者をドラッグ：X / Z"
                         : "第三者視点・側面図　観測者をドラッグ：Z / Y",
@@ -2770,6 +2784,19 @@ namespace DomeProjection
         {
             var diagram = new Rect(available.x + 44f, available.y + 52f,
                 available.width - 88f, available.height - 104f);
+            var projectionModeButton = new Rect(diagram.x + 8f, diagram.y + 6f, 112f, 28f);
+            var contentModeButton = new Rect(diagram.x + 126f, diagram.y + 6f, 132f, 28f);
+            if (GUI.Button(projectionModeButton, "投影範囲",
+                    roomOverviewShowContent ? tabStyle : activeTabStyle))
+                roomOverviewShowContent = false;
+            if (GUI.Button(contentModeButton, "観測者プレビュー",
+                    roomOverviewShowContent ? activeTabStyle : tabStyle))
+                roomOverviewShowContent = true;
+            if (roomOverviewShowContent)
+            {
+                DrawRoomContentObserverPreview(diagram, projectionModeButton, contentModeButton);
+                return;
+            }
             var roomWidth = Mathf.Max(settings.roomWidth, 0.01f);
             var roomHeight = Mathf.Max(settings.roomHeight, 0.01f);
             var roomDepth = Mathf.Max(settings.roomDepth, 0.01f);
@@ -2982,6 +3009,202 @@ namespace DomeProjection
                     available.width - 32f, 24f),
                 $"空き領域ドラッグ：3D視点を回転 / ホイール：拡大縮小　　観測者 X {settings.roomViewerX:0.00} / Y {settings.roomViewerY:0.00} / Z {settings.roomViewerZ:0.00} m",
                 smallStyle);
+        }
+
+        private void DrawRoomContentObserverPreview(Rect diagram, Rect projectionModeButton,
+            Rect contentModeButton)
+        {
+            var resetView = new Rect(diagram.xMax - 116f, diagram.y + 6f, 108f, 28f);
+            var guideButton = new Rect(diagram.xMax - 238f, diagram.y + 6f, 116f, 28f);
+            var current = Event.current;
+            var mouse = GetLogicalMousePosition();
+            if (GUI.Button(resetView, "視点を正面へ"))
+            {
+                roomContentPreviewYaw = 0f;
+                roomContentPreviewPitch = 0f;
+                roomContentPreviewFov = 95f;
+            }
+            if (GUI.Button(guideButton,
+                    roomContentPreviewShowGuide ? "面ガイド：表示" : "面ガイド：非表示",
+                    roomContentPreviewShowGuide ? activeTabStyle : tabStyle))
+                roomContentPreviewShowGuide = !roomContentPreviewShowGuide;
+            if (current.type == EventType.ScrollWheel && diagram.Contains(mouse)
+                && !projectionModeButton.Contains(mouse) && !contentModeButton.Contains(mouse)
+                && !resetView.Contains(mouse) && !guideButton.Contains(mouse))
+            {
+                roomContentPreviewFov = Mathf.Clamp(roomContentPreviewFov
+                    + current.delta.y * 2.5f, 30f, 140f);
+                current.Use();
+            }
+            else if (current.type == EventType.MouseDown && current.button == 0
+                     && diagram.Contains(mouse)
+                     && !projectionModeButton.Contains(mouse) && !contentModeButton.Contains(mouse)
+                     && !resetView.Contains(mouse) && !guideButton.Contains(mouse))
+            {
+                roomContentPreviewDragging = true;
+                roomContentPreviewLastMouse = mouse;
+                current.Use();
+            }
+            else if (current.type == EventType.MouseDrag && roomContentPreviewDragging)
+            {
+                var delta = mouse - roomContentPreviewLastMouse;
+                roomContentPreviewLastMouse = mouse;
+                roomContentPreviewYaw = NormalizeControlPreviewRotation(
+                    roomContentPreviewYaw + delta.x * 0.22f);
+                roomContentPreviewPitch = Mathf.Clamp(roomContentPreviewPitch
+                    - delta.y * 0.22f, -89f, 89f);
+                current.Use();
+            }
+            if (current.rawType == EventType.MouseUp) roomContentPreviewDragging = false;
+
+            GetRoomContentPreviewSource(out var texture, out var flipY, out var contentMode,
+                out var sourceWidth, out var sourceHeight, out var sourceLabel);
+            if (texture != null && current.type == EventType.Repaint
+                && roomContentPreviewRenderer != null)
+            {
+                var rendered = roomContentPreviewRenderer.Render(settings, texture, flipY,
+                    contentMode, sourceWidth, sourceHeight, roomContentPreviewYaw,
+                    roomContentPreviewPitch, roomContentPreviewFov, roomContentPreviewShowGuide,
+                    Mathf.RoundToInt(diagram.width), Mathf.RoundToInt(diagram.height));
+                if (rendered != null)
+                    GUI.DrawTexture(diagram, rendered, ScaleMode.StretchToFill, false);
+            }
+            else if (texture == null)
+            {
+                DrawSolidGuiRect(diagram, new Color(0.025f, 0.032f, 0.045f, 1f));
+                GUI.Label(new Rect(diagram.x + 20f, diagram.center.y - 18f,
+                        diagram.width - 40f, 36f),
+                    "プレビューする動画・画像を読み込んでください",
+                    sectionTitleStyle);
+            }
+
+            // Draw controls again because the render texture occupies the
+            // complete preview area and would otherwise cover them.
+            GUI.Button(projectionModeButton, "投影範囲",
+                roomOverviewShowContent ? tabStyle : activeTabStyle);
+            GUI.Button(contentModeButton, "観測者プレビュー", activeTabStyle);
+            GUI.Button(guideButton,
+                roomContentPreviewShowGuide ? "面ガイド：表示" : "面ガイド：非表示",
+                roomContentPreviewShowGuide ? activeTabStyle : tabStyle);
+            GUI.Button(resetView, "視点を正面へ");
+            GUI.Label(new Rect(diagram.x + 12f, diagram.y + 40f,
+                    Mathf.Max(140f, diagram.width - 24f), 24f),
+                $"観測者位置からの素材方向　ドラッグ：見回す / ホイール：視野角　Yaw {roomContentPreviewYaw:0}° / Pitch {roomContentPreviewPitch:0}° / FOV {roomContentPreviewFov:0}°",
+                smallStyle);
+            if (texture != null)
+            {
+                GUI.Label(new Rect(diagram.x + 12f, diagram.y + 62f,
+                        Mathf.Max(140f, diagram.width - 24f), 24f),
+                    $"表示素材：{sourceLabel}", smallStyle);
+                DrawRoomSourceOverview(diagram, texture, flipY, contentMode,
+                    sourceWidth, sourceHeight);
+            }
+            GUI.Label(new Rect(diagram.x + 12f, diagram.yMax - 30f,
+                    Mathf.Max(140f, diagram.width - 24f), 24f),
+                "素材の方向と観測者からの見え方を確認します。実際の到達範囲は「投影範囲」で確認してください。",
+                smallStyle);
+            var crossColor = new Color(1f, 1f, 1f, 0.72f);
+            DrawSolidGuiRect(new Rect(diagram.center.x - 12f, diagram.center.y - 1f,
+                24f, 2f), crossColor);
+            DrawSolidGuiRect(new Rect(diagram.center.x - 1f, diagram.center.y - 12f,
+                2f, 24f), crossColor);
+        }
+
+        private void GetRoomContentPreviewSource(out Texture texture, out bool flipY,
+            out int contentMode, out int sourceWidth, out int sourceHeight,
+            out string sourceLabel)
+        {
+            texture = null;
+            flipY = false;
+            contentMode = 0;
+            sourceWidth = 0;
+            sourceHeight = 0;
+            sourceLabel = "";
+
+            // This is a material inspection view, not a mirror of the standby
+            // state. Keep showing the selected source even while Output is on
+            // black/default/guide standby so calibration can be prepared first.
+            if (settings.sourceMode == 1 && windowCapture?.Texture != null)
+            {
+                texture = windowCapture.Texture;
+                contentMode = 1;
+                sourceWidth = windowCapture.Width;
+                sourceHeight = windowCapture.Height;
+                sourceLabel = string.IsNullOrWhiteSpace(settings.capturedWindowTitle)
+                    ? "外部ウィンドウ" : settings.capturedWindowTitle;
+                return;
+            }
+            if (video?.Texture != null)
+            {
+                texture = video.Texture;
+                flipY = video.RequiresVerticalFlip;
+                contentMode = settings.fileProjectionMode;
+                sourceWidth = video.Width > 0 ? video.Width : texture.width;
+                sourceHeight = video.Height > 0 ? video.Height : texture.height;
+                var sourcePath = string.IsNullOrWhiteSpace(video.SourcePath)
+                    ? settings.videoPath : video.SourcePath;
+                sourceLabel = string.IsNullOrWhiteSpace(sourcePath)
+                    ? "選択素材" : Path.GetFileName(sourcePath);
+                return;
+            }
+            if (windowCapture?.Texture != null)
+            {
+                texture = windowCapture.Texture;
+                contentMode = 1;
+                sourceWidth = windowCapture.Width;
+                sourceHeight = windowCapture.Height;
+                sourceLabel = "外部ウィンドウ";
+                return;
+            }
+            if (settings.idleDisplayMode == 1 && idleImage?.IsPrepared == true)
+            {
+                texture = idleImage.Texture;
+                flipY = idleImage.RequiresVerticalFlip;
+                contentMode = settings.idleImageIsFlat ? 1 : 0;
+                sourceWidth = idleImage.Width;
+                sourceHeight = idleImage.Height;
+                sourceLabel = "既定画像（素材未読込）";
+            }
+        }
+
+        private void DrawRoomSourceOverview(Rect diagram, Texture texture, bool decoderFlipY,
+            int contentMode, int sourceWidth, int sourceHeight)
+        {
+            var aspect = sourceHeight > 0
+                ? sourceWidth / (float)sourceHeight
+                : texture.width / (float)Mathf.Max(texture.height, 1);
+            aspect = Mathf.Clamp(aspect, 0.75f, 3f);
+            var width = Mathf.Min(330f, diagram.width * 0.30f);
+            var height = Mathf.Clamp(width / aspect, 90f, 190f);
+            var frame = new Rect(diagram.xMax - width - 16f,
+                diagram.yMax - height - 42f, width, height);
+            DrawSolidGuiRect(new Rect(frame.x - 3f, frame.y - 25f,
+                frame.width + 6f, frame.height + 28f), new Color(0.03f, 0.04f, 0.055f, 0.92f));
+            GUI.Label(new Rect(frame.x + 4f, frame.y - 23f, frame.width - 8f, 22f),
+                contentMode == 0 ? "素材全体（白十字：現在の視線）" : "素材全体",
+                smallStyle);
+            var uv = new Rect(settings.flipInputX ? 1f : 0f,
+                settings.flipInputY ^ decoderFlipY ? 1f : 0f,
+                settings.flipInputX ? -1f : 1f,
+                settings.flipInputY ^ decoderFlipY ? -1f : 1f);
+            GUI.DrawTextureWithTexCoords(frame, texture, uv, true);
+
+            if (contentMode != 0) return;
+            var direction = Quaternion.Euler(-roomContentPreviewPitch,
+                roomContentPreviewYaw, 0f) * Vector3.forward;
+            direction = Quaternion.AngleAxis(settings.yaw, Vector3.up) * direction;
+            direction = Quaternion.AngleAxis(settings.pitch, Vector3.right) * direction;
+            direction = Quaternion.AngleAxis(settings.roll, Vector3.forward) * direction;
+            var markerU = Mathf.Repeat(Mathf.Atan2(direction.x, direction.z)
+                / (Mathf.PI * 2f) + 0.5f, 1f);
+            var markerV = 0.5f - Mathf.Asin(Mathf.Clamp(direction.y, -1f, 1f)) / Mathf.PI;
+            if (settings.flipInputX) markerU = 1f - markerU;
+            if (settings.flipInputY ^ decoderFlipY) markerV = 1f - markerV;
+            var marker = new Vector2(frame.x + markerU * frame.width,
+                frame.y + markerV * frame.height);
+            var color = new Color(1f, 1f, 1f, 0.96f);
+            DrawSolidGuiRect(new Rect(marker.x - 10f, marker.y - 1f, 20f, 2f), color);
+            DrawSolidGuiRect(new Rect(marker.x - 1f, marker.y - 10f, 2f, 20f), color);
         }
 
         private static void DrawGuiSegment(Vector2 start, Vector2 end, Color color, float thickness)
@@ -5838,8 +6061,11 @@ namespace DomeProjection
                     current.Use();
                     break;
                 case KeyCode.V:
-                    if (settings.projectionRegionMode != 2 || !roomWarpEditing) break;
-                    roomCalibrationShowOverview = !roomCalibrationShowOverview;
+                    if (settings.projectionRegionMode != 2) break;
+                    if (roomWarpEditing)
+                        roomCalibrationShowOverview = !roomCalibrationShowOverview;
+                    else
+                        settings.roomControlViewMode = settings.roomControlViewMode == 1 ? 0 : 1;
                     current.Use();
                     break;
                 case KeyCode.C:
