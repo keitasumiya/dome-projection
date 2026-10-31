@@ -17,6 +17,7 @@ namespace DomeProjection
         private static readonly int DomeFov = Shader.PropertyToID("_DomeFov");
         private static readonly int ProjectionRegionMode = Shader.PropertyToID("_ProjectionRegionMode");
         private static readonly int OffAxisProjection = Shader.PropertyToID("_OffAxisProjection");
+        private static readonly int OffAxisHorizontal = Shader.PropertyToID("_OffAxisHorizontal");
         private static readonly int RoomDimensions = Shader.PropertyToID("_RoomDimensions");
         private static readonly int RoomProjectorPosition = Shader.PropertyToID("_RoomProjectorPosition");
         private static readonly int RoomProjectorRotation = Shader.PropertyToID("_RoomProjectorRotation");
@@ -52,9 +53,11 @@ namespace DomeProjection
 
         private Material material;
         private Camera outputCamera;
-
+        private RenderTexture operatorPreviewTexture;
         public DomeProjectionSettings Settings { get; set; }
         public float ContentOpacity { get; set; } = 1f;
+        public bool CaptureOperatorPreview { get; set; }
+        public Texture OperatorPreviewTexture => operatorPreviewTexture;
         // Control-only inspection transform. Output always keeps 1 / 0 degrees.
         public float ControlPreviewScale { get; set; } = 1f;
         public float ControlPreviewRotation { get; set; }
@@ -87,7 +90,35 @@ namespace DomeProjection
 
         private void OnDestroy()
         {
+            if (operatorPreviewTexture != null)
+            {
+                operatorPreviewTexture.Release();
+                Destroy(operatorPreviewTexture);
+            }
             if (material != null) Destroy(material);
+        }
+
+        private void EnsureOperatorPreviewTexture(float aspect)
+        {
+            aspect = Mathf.Clamp(aspect, 0.25f, 4f);
+            const int targetHeight = 270;
+            var targetWidth = Mathf.Clamp(Mathf.RoundToInt(targetHeight * aspect), 180, 720);
+            if (operatorPreviewTexture != null
+                && operatorPreviewTexture.width == targetWidth
+                && operatorPreviewTexture.height == targetHeight) return;
+            if (operatorPreviewTexture != null)
+            {
+                operatorPreviewTexture.Release();
+                Destroy(operatorPreviewTexture);
+            }
+            operatorPreviewTexture = new RenderTexture(targetWidth, targetHeight, 0,
+                RenderTextureFormat.ARGB32)
+            {
+                name = "Control Output Preview",
+                hideFlags = HideFlags.HideAndDontSave,
+                filterMode = FilterMode.Bilinear
+            };
+            operatorPreviewTexture.Create();
         }
 
         private void OnRenderImage(RenderTexture source, RenderTexture destination)
@@ -150,6 +181,8 @@ namespace DomeProjection
             material.SetVector(OffAxisProjection, new Vector4(Settings.offAxisProjectorDistance,
                 Settings.offAxisProjectorHeight, Settings.offAxisAimElevation,
                 Settings.offAxisMinimumElevation));
+            material.SetVector(OffAxisHorizontal, new Vector4(Settings.offAxisProjectorX,
+                Settings.offAxisAimYaw, 0f, 0f));
             material.SetVector(RoomDimensions, new Vector4(Settings.roomWidth,
                 Settings.roomHeight, Settings.roomDepth, Settings.roomGridSpacing));
             material.SetVector(RoomProjectorPosition, new Vector4(Settings.roomProjectorX,
@@ -229,6 +262,124 @@ namespace DomeProjection
             material.SetFloat(ContentOpacityId, Mathf.Clamp01(ContentOpacity));
 
             Graphics.Blit(source, destination, material, 0);
+
+            if (CaptureOperatorPreview)
+            {
+                EnsureOperatorPreviewTexture(outputAspect);
+                // The inset is an Output preview, not the operator's temporary
+                // pan/zoom/rotation inspection view.
+                material.SetVector(ControlPreviewId, new Vector4(1f, 0f, 0f, 0f));
+                Graphics.Blit(source, operatorPreviewTexture, material, 0);
+                material.SetVector(ControlPreviewId, new Vector4(
+                    Mathf.Clamp(ControlPreviewScale, 0.01f, 1f),
+                    ControlPreviewRotation, ControlPreviewYaw, ControlPreviewPitch));
+            }
+        }
+
+        public static bool TryGetDomeHitAtOpticalPoint(DomeProjectionSettings settings,
+            Vector2 opticalPoint, out Vector3 projector, out Vector3 sphereHit)
+        {
+            projector = settings.projectionRegionMode == 1
+                ? new Vector3(settings.offAxisProjectorX, settings.offAxisProjectorHeight,
+                    -settings.offAxisProjectorDistance)
+                : Vector3.zero;
+            sphereHit = Vector3.zero;
+
+            var halfFov = Mathf.Max(settings.domeFov * 0.5f * Mathf.Deg2Rad, 0.001f);
+            // Match the Output shader exactly. Very wide values can otherwise
+            // wrap past the back pole on CPU while the shader clamps at PI.
+            var theta = Mathf.Clamp(opticalPoint.magnitude * halfFov, 0f, Mathf.PI);
+            var azimuth = Mathf.Atan2(opticalPoint.x, opticalPoint.y);
+            var sinTheta = Mathf.Sin(theta);
+            var ray = new Vector3(sinTheta * Mathf.Sin(azimuth),
+                sinTheta * Mathf.Cos(azimuth), Mathf.Cos(theta));
+
+            if (settings.projectionRegionMode != 1)
+            {
+                // Centre projection uses zenithal/equidistant coordinates:
+                // optical radius zero is the dome zenith (+Y), not the
+                // projector-forward direction (+Z) used by edge placement.
+                sphereHit = new Vector3(sinTheta * Mathf.Sin(azimuth),
+                    Mathf.Cos(theta), sinTheta * Mathf.Cos(azimuth)).normalized;
+                return true;
+            }
+
+            var aim = settings.offAxisAimElevation * Mathf.Deg2Rad;
+            var cosine = Mathf.Cos(aim);
+            var sine = Mathf.Sin(aim);
+            var pitchedRay = new Vector3(ray.x, cosine * ray.y + sine * ray.z,
+                -sine * ray.y + cosine * ray.z);
+            var yaw = settings.offAxisAimYaw * Mathf.Deg2Rad;
+            var yawCosine = Mathf.Cos(yaw);
+            var yawSine = Mathf.Sin(yaw);
+            ray = new Vector3(yawCosine * pitchedRay.x + yawSine * pitchedRay.z,
+                pitchedRay.y, -yawSine * pitchedRay.x + yawCosine * pitchedRay.z).normalized;
+
+            var projectorDotRay = Vector3.Dot(projector, ray);
+            var discriminant = projectorDotRay * projectorDotRay
+                               - (projector.sqrMagnitude - 1f);
+            if (discriminant < 0f) return false;
+            // Use the far root. When a projector is at or just outside the
+            // sphere this deliberately ignores the near-side intersection and
+            // reaches the intended opposite dome surface, matching the shader.
+            var distance = -projectorDotRay + Mathf.Sqrt(discriminant);
+            if (distance <= 0.0001f) return false;
+            sphereHit = projector + ray * distance;
+            var elevation = Mathf.Asin(Mathf.Clamp(sphereHit.normalized.y, -1f, 1f))
+                            * Mathf.Rad2Deg;
+            return elevation >= settings.offAxisMinimumElevation - 0.001f;
+        }
+
+        public static bool TryGetDomeHitAtOutputPoint(DomeProjectionSettings settings,
+            float aspect, Vector2 outputPoint,
+            out Vector3 projector, out Vector3 sphereHit)
+        {
+            projector = Vector3.zero;
+            sphereHit = Vector3.zero;
+            if (!TryGetLensPointAtOutputPoint(settings, aspect, outputPoint,
+                    out var lensPoint))
+                return false;
+
+            return TryGetDomeHitAtOpticalPoint(settings, lensPoint,
+                out projector, out sphereHit);
+        }
+
+        private static bool TryGetLensPointAtOutputPoint(
+            DomeProjectionSettings settings, float aspect, Vector2 outputPoint,
+            out Vector2 lensPoint)
+        {
+            aspect = Mathf.Max(aspect, 0.01f);
+            var point = outputPoint - new Vector2(settings.centerX, settings.centerY);
+            point.x *= aspect;
+            point.x /= Mathf.Max(settings.radius * settings.ellipseX, 0.0001f);
+            point.y /= Mathf.Max(settings.radius * settings.ellipseY, 0.0001f);
+            var rotation = settings.outputRotation * Mathf.Deg2Rad;
+            var cosine = Mathf.Cos(rotation);
+            var sine = Mathf.Sin(rotation);
+            point = new Vector2(cosine * point.x - sine * point.y,
+                sine * point.x + cosine * point.y);
+            if (point.magnitude > 1f)
+            {
+                lensPoint = Vector2.zero;
+                return false;
+            }
+            var directionalScale = 1f
+                + settings.warpTop * Mathf.Pow(Mathf.Max(point.y, 0f), 2f)
+                + settings.warpBottom * Mathf.Pow(Mathf.Max(-point.y, 0f), 2f)
+                + settings.warpLeft * Mathf.Pow(Mathf.Max(-point.x, 0f), 2f)
+                + settings.warpRight * Mathf.Pow(Mathf.Max(point.x, 0f), 2f);
+            var shaped = point * directionalScale;
+            var radiusSquared = shaped.sqrMagnitude;
+            var radialScale = 1f + settings.radialK1 * radiusSquared
+                + settings.radialK2 * radiusSquared * radiusSquared
+                + settings.radialK3 * radiusSquared * radiusSquared * radiusSquared;
+            lensPoint = shaped * radialScale;
+            lensPoint += new Vector2(
+                2f * settings.tangentialP1 * shaped.x * shaped.y
+                    + settings.tangentialP2 * (radiusSquared + 2f * shaped.x * shaped.x),
+                settings.tangentialP1 * (radiusSquared + 2f * shaped.y * shaped.y)
+                    + 2f * settings.tangentialP2 * shaped.x * shaped.y);
+            return true;
         }
 
         public static bool CalculateRoomReferenceCorners(DomeProjectionSettings settings, float aspect,

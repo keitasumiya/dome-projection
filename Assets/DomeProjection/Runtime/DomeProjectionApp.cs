@@ -21,6 +21,7 @@ namespace DomeProjection
         private const float ReferenceUiHeight = 900f;
         private const int TransportWindowId = 0x44A1;
         private const float VideoPathWidth = 288f;
+        private const float MaterialYawKeyHoldDelay = 0.25f;
         // AVPro's native decoder accepts approximate preview seeks continuously;
         // match a typical display refresh rate while the pointer is dragged.
         private const float SeekPreviewInterval = 1f / 60f;
@@ -178,6 +179,7 @@ namespace DomeProjection
         private int playlistTransitionPhase;
         private float playlistTransitionOpacity = 1f;
         private float playlistFadeInStarted;
+        private float activeStillImageElapsed;
         private bool roomWarpEditing;
         // Session-only Control inspection view. It intentionally never changes
         // the projector/output process, and returns to the output view at launch.
@@ -197,6 +199,7 @@ namespace DomeProjection
         private bool roomOverviewOrbitDragging;
         private Vector2 roomOverviewLastMouse;
         private RoomContentPreviewRenderer roomContentPreviewRenderer;
+        private DomeSimulationPreviewRenderer domeSimulationPreviewRenderer;
         private bool roomOverviewShowContent = true;
         private float roomContentPreviewYaw;
         private float roomContentPreviewPitch;
@@ -204,6 +207,28 @@ namespace DomeProjection
         private bool roomContentPreviewDragging;
         private Vector2 roomContentPreviewLastMouse;
         private bool roomContentPreviewShowGuide;
+        private bool materialYawDragging;
+        private Vector2 materialYawLastMouse;
+        private bool materialYawQHeld;
+        private bool materialYawEHeld;
+        private float materialYawQHoldStarted;
+        private float materialYawEHoldStarted;
+        private bool domeGuiEditing;
+        private LensCalibrationProfile domeGuiCalibrationStartProfile;
+        private readonly Stack<LensCalibrationProfile> domeGuiUndoHistory = new();
+        private bool domeSimulationVisible;
+        private float domeSimulationYaw = 35f;
+        private float domeSimulationPitch = 22f;
+        private float domeSimulationZoom = 1f;
+        private bool domeSimulationOrbitDragging;
+        private Vector2 domeSimulationLastMouse;
+        private bool domeSimulationProjectorDragging;
+        private Vector2 domeSimulationProjectorLastMouse;
+        private bool domeSimulationAimDragging;
+        private Vector2 domeSimulationAimLastMouse;
+        private bool domeSimulationShowFullSphere;
+        private bool domeSimulationShowMaterial = true;
+        private bool domeSimulationShowGuide = true;
 
         private sealed class RoomCalibrationAnchor
         {
@@ -396,10 +421,20 @@ namespace DomeProjection
             }
         }
 
+        private void OnApplicationFocus(bool hasFocus)
+        {
+            // A KeyUp event is not guaranteed when the operator switches to
+            // another application while holding Q/E. Never leave continuous
+            // Yaw rotation latched after focus is lost.
+            if (!hasFocus) materialYawQHeld = materialYawEHeld = false;
+        }
+
         private void OnDestroy()
         {
             roomContentPreviewRenderer?.Dispose();
             roomContentPreviewRenderer = null;
+            domeSimulationPreviewRenderer?.Dispose();
+            domeSimulationPreviewRenderer = null;
             if (panelTexture != null) Destroy(panelTexture);
             if (sliderTexture != null) Destroy(sliderTexture);
             if (sliderThumbTexture != null) Destroy(sliderThumbTexture);
@@ -575,7 +610,10 @@ namespace DomeProjection
             previewRenderer.WindowBackgroundImageSource = windowBackgroundImage;
             previewRenderer.WindowSource = windowCapture;
             if (!projectorMode)
+            {
                 roomContentPreviewRenderer = new RoomContentPreviewRenderer(transform);
+                domeSimulationPreviewRenderer = new DomeSimulationPreviewRenderer(transform);
+            }
         }
 
         private void OnMediaPrepared()
@@ -647,7 +685,15 @@ namespace DomeProjection
             var fraction = Mathf.Clamp01(pendingPlaylistSeekFraction);
             pendingPlaylistSeekFraction = -1f;
             pendingPlaylistSeekMaterialId = string.Empty;
-            if (video.IsStillImage || video.Duration <= 0d) return;
+            if (video.IsStillImage)
+            {
+                var material = FindMaterial(materialId);
+                activeStillImageElapsed = PlaylistEntryDuration(
+                    playlist, activePlaylistEntryIndex, material) * fraction;
+                mediaShouldPlayWhenVisible = pendingPlaylistSeekShouldPlay;
+                return;
+            }
+            if (video.Duration <= 0d) return;
             if (playlistSeekDragging)
             {
                 mediaShouldPlayWhenVisible = false;
@@ -691,7 +737,7 @@ namespace DomeProjection
             {
                 playlistTransitionOpacity = 0f;
                 playlistAdvanceAttempted = true;
-                if (AdvanceActivePlaylist(1))
+                if (AdvancePlaylistAfterCompletion())
                 {
                     playlistTransitionPhase = 2;
                     playlistFadeInStarted = Time.unscaledTime;
@@ -702,7 +748,7 @@ namespace DomeProjection
             if (!playlistAdvanceAttempted && !projectorMode && activePlaylistIndex >= 0
                 && activePlaylistIndex < playlistCatalog.playlists.Count
                 && playlistCatalog.playlists[activePlaylistIndex].autoAdvance
-                && AdvanceActivePlaylist(1)) return;
+                && AdvancePlaylistAfterCompletion()) return;
             mediaShouldPlayWhenVisible = false;
             SetIdleScreenVisible(true);
             status = activePlaylistCompleted
@@ -1321,6 +1367,7 @@ namespace DomeProjection
             }
             else
             {
+                UpdateMaterialYawKeyHold();
                 UpdatePlaylistTransition();
                 UpdateControlProcess();
             }
@@ -1336,6 +1383,9 @@ namespace DomeProjection
             outputRenderer.ControlPreviewYaw = controlYaw;
             outputRenderer.ControlPreviewPitch = controlPitch;
             outputRenderer.ProjectionAspectOverride = projectionAspect;
+            outputRenderer.CaptureOperatorPreview = !projectorMode
+                && settings.projectionRegionMode < 2
+                && (domeSimulationVisible || domeGuiEditing);
             previewRenderer.ControlPreviewScale = controlScale;
             previewRenderer.ControlPreviewRotation = controlRotation;
             previewRenderer.ControlPreviewYaw = controlYaw;
@@ -1718,24 +1768,40 @@ namespace DomeProjection
                 GUILayout.Space(6f);
                 GUILayout.Label(settings.sourceMode == 1
                     ? "←/→・PgUp/PgDn: スライド移動   T: 操作先へ切替   B: 待機画面   G: ガイド   H: UI   F: 全画面   Esc: 全画面解除"
-                    : "1/2/3/4/5: タブ   F5/F6: 素材/画面取込   Ctrl+O: 素材選択   Space: 再生/停止   B: 待機画面   G: ガイド   H: UI", smallStyle);
+                    : "1/2/3/4/5: タブ   F5/F6: 素材/画面取込   Ctrl+O: 素材選択   Space: 再生/停止   Q/E: 表示Yaw±1°   Alt＋横ドラッグ: 表示Yaw   B: 待機画面   G: ガイド   H: UI", smallStyle);
                 if (settings.projectionRegionMode == 2)
                     GUILayout.Label("W: 前面4隅ワープを開始／完了   V: 投影確認／3D俯瞰   C: 調整キャンセル", smallStyle);
+                else
+                    GUILayout.Label("V: 投影結果／3Dシミュレーション", smallStyle);
                 GUILayout.Label($"出力 {Screen.width}×{Screen.height} / Display {settings.outputDisplay}", smallStyle);
                 GUILayout.EndVertical();
                 GUILayout.EndScrollView();
                 GUILayout.EndArea();
             }
 
-            if (!roomWarpEditing) DrawPanelVisibilityToggle(logicalWidth, margin);
-            if (settings.projectionRegionMode == 2 && roomWarpEditing)
+            if (!roomWarpEditing && !domeGuiEditing) DrawPanelVisibilityToggle(logicalWidth, margin);
+            if (domeGuiEditing)
+            {
+                // The toolbar must register IMGUI controls before any 3D
+                // drag handler. Projected handles can legitimately be far
+                // outside the visible sphere; if the diagram sees MouseDown
+                // first, one of those handles can otherwise steal the click
+                // from Cancel / Reset / Finish.
+                DrawDomePhysicalCalibrationToolbar(logicalWidth, logicalHeight, margin);
+                if (domeGuiEditing)
+                    DrawDomeSimulationEditor(logicalWidth, logicalHeight, margin);
+            }
+            else if (settings.projectionRegionMode == 2 && roomWarpEditing)
                 DrawRoomAdjustmentHandles(logicalWidth, logicalHeight, margin);
             else if (settings.projectionRegionMode == 2 && settings.roomControlViewMode > 0)
                 DrawRoomObserverEditor(logicalWidth, logicalHeight, margin);
+            else if (settings.projectionRegionMode < 2 && domeSimulationVisible)
+                DrawDomeSimulationEditor(logicalWidth, logicalHeight, margin);
             else if (IsControlPreviewTransformed())
                 DrawControlPreviewFrame(logicalWidth, logicalHeight, margin, true);
             if (drawLargeTransportOverlay) DrawTransportOverlay(logicalWidth, logicalHeight, margin);
             if (showWindowDropdown && settings.sourceMode == 1) DrawWindowDropdown();
+            HandleMaterialYawDragGesture();
             // Cache after controls have registered their IMGUI names so plain
             // character shortcuts never consume text typed into a field.
             textInputFocused = showControls && IsTextInputFocused();
@@ -1806,11 +1872,26 @@ namespace DomeProjection
                     ToggleActivePlaylistPlayback();
                 if (GUILayout.Button(new GUIContent("次へ ▶|", "次の素材"), GUILayout.Width(82f)))
                     AdvanceActivePlaylist(1);
-                var loopStyle = playlist.loop ? activeTabStyle : tabStyle;
-                if (GUILayout.Button(new GUIContent("↻", "末尾から先頭へループ"), loopStyle,
-                        GUILayout.Width(40f), GUILayout.Height(28f)))
+                var loopLabel = playlist.loopMode switch
                 {
-                    playlist.loop = !playlist.loop;
+                    1 => "↻ 全体",
+                    2 => "↻ 1素材",
+                    _ => "↻ なし"
+                };
+                var loopTip = playlist.loopMode switch
+                {
+                    1 => "プレイリスト末尾から先頭へ戻る",
+                    2 => "現在の1素材だけを繰り返す",
+                    _ => "ループしない"
+                };
+                var loopStyle = playlist.loopMode > 0 ? activeTabStyle : tabStyle;
+                if (GUILayout.Button(new GUIContent(loopLabel, loopTip), loopStyle,
+                        GUILayout.Width(102f), GUILayout.Height(28f)))
+                {
+                    playlist.loopMode = (playlist.loopMode + 1) % 3;
+                    playlist.loop = playlist.loopMode == 1;
+                    ResetPlaylistTransition();
+                    ClearPlaylistPreload();
                     SavePlaylistCatalog();
                 }
             }
@@ -1883,7 +1964,7 @@ namespace DomeProjection
             }
             var toolbarWidth = Mathf.Min(1060f, logicalWidth - margin * 2f);
             var toolbar = new Rect((logicalWidth - toolbarWidth) * 0.5f, margin,
-                toolbarWidth, 112f);
+                toolbarWidth, 138f);
             DrawSolidGuiRect(toolbar, new Color(0.12f, 0.14f, 0.17f, 0.96f));
             GUI.Label(new Rect(toolbar.x + 12f, toolbar.y + 8f, 230f, 26f),
                 "前面4隅ワープ：各頂点をドラッグ", sectionTitleStyle);
@@ -2639,6 +2720,494 @@ namespace DomeProjection
                 4 => "右壁",
                 _ => "前面"
             };
+        }
+
+        private void DrawDomeSimulationEditor(float logicalWidth, float logicalHeight, float margin)
+        {
+            var available = new Rect(margin, 58f, logicalWidth - margin * 2f,
+                logicalHeight - 78f);
+            if (showControls)
+            {
+                const float panelButtonAllowance = 165f;
+                if (settings.controlPanelOnRight)
+                    available.xMax = panelAreaRect.x - panelButtonAllowance;
+                else
+                {
+                    available.xMin = panelAreaRect.xMax + panelButtonAllowance;
+                    available.width = logicalWidth - margin - available.xMin;
+                }
+            }
+            // During physical calibration the toolbar owns the bottom of the
+            // window.  Previously the 3D diagram continued underneath it and
+            // consumed slider drags as orbit gestures before the sliders saw
+            // the event.
+            if (domeGuiEditing)
+            {
+                var toolbarBounds = GetDomePhysicalCalibrationToolbarRect(
+                    logicalWidth, logicalHeight, margin);
+                available.yMax = Mathf.Min(available.yMax,
+                    toolbarBounds.y - 8f);
+            }
+            if (available.width < 280f || available.height < 260f) return;
+
+            DrawSolidGuiRect(available, new Color(0.025f, 0.034f, 0.048f, 1f));
+            var projectionAspectForInset = Mathf.Max(GetProjectionAspect(), 0.25f);
+            Rect diagram;
+            Rect outputPreviewPanel;
+            if (available.width >= 760f)
+            {
+                var previewColumnWidth = Mathf.Clamp(available.width * 0.28f, 220f, 360f);
+                diagram = new Rect(available.x + 24f, available.y + 44f,
+                    available.width - previewColumnWidth - 64f,
+                    available.height - 80f);
+                outputPreviewPanel = new Rect(diagram.xMax + 16f,
+                    available.y + 54f, previewColumnWidth,
+                    available.height - 86f);
+            }
+            else
+            {
+                diagram = new Rect(available.x + 24f, available.y + 44f,
+                    available.width - 48f, available.height - 80f);
+                var insetWidth = Mathf.Clamp(available.width * 0.34f, 180f, 260f);
+                var insetHeight = insetWidth / projectionAspectForInset + 38f;
+                outputPreviewPanel = new Rect(diagram.xMax - insetWidth - 8f,
+                    diagram.yMax - insetHeight - 8f, insetWidth, insetHeight);
+            }
+            var projector = settings.projectionRegionMode == 1
+                ? new Vector3(settings.offAxisProjectorX, settings.offAxisProjectorHeight,
+                    -settings.offAxisProjectorDistance)
+                : Vector3.zero;
+            var worldExtent = Mathf.Max(1.15f, projector.magnitude + 0.25f);
+            var baseScale = Mathf.Min(diagram.width, diagram.height)
+                            / (worldExtent * 2.5f) * domeSimulationZoom;
+            var viewRotation = Quaternion.Euler(domeSimulationPitch,
+                -domeSimulationYaw, 0f);
+            Vector2 Project(Vector3 world)
+            {
+                var view = viewRotation * world;
+                return diagram.center + new Vector2(view.x, -view.y) * baseScale;
+            }
+
+            var current = Event.current;
+            var mouse = GetLogicalMousePosition();
+            var pointerOverOutputPreview = outputPreviewPanel.Contains(mouse);
+            var calibrationToolbar = domeGuiEditing
+                ? GetDomePhysicalCalibrationToolbarRect(logicalWidth,
+                    logicalHeight, margin)
+                : Rect.zero;
+            var pointerOverCalibrationToolbar = domeGuiEditing
+                                                && calibrationToolbar.Contains(mouse);
+            if (pointerOverCalibrationToolbar
+                && current.type == EventType.MouseDown)
+            {
+                domeSimulationOrbitDragging = false;
+                domeSimulationProjectorDragging = false;
+                domeSimulationAimDragging = false;
+            }
+            var resetView = new Rect(available.xMax - 132f, available.y + 8f, 116f, 28f);
+            var projectorPoint = Project(projector);
+            var hasAxisHit = DomeProjectionRenderer.TryGetDomeHitAtOpticalPoint(settings,
+                Vector2.zero, out _, out var axisHit);
+            var axisPoint = hasAxisHit ? Project(axisHit) : Vector2.zero;
+            var physicalEditing = domeGuiEditing && settings.projectionRegionMode == 1;
+            var projectorHandleHovered = physicalEditing
+                                         && Vector2.Distance(mouse, projectorPoint) <= 24f;
+            var axisHandleHovered = physicalEditing && hasAxisHit
+                                    && Vector2.Distance(mouse, axisPoint) <= 22f;
+            if (GUI.Button(resetView, "3D視点をリセット"))
+            {
+                domeSimulationYaw = 35f;
+                domeSimulationPitch = 22f;
+                domeSimulationZoom = 1f;
+            }
+            if (!pointerOverCalibrationToolbar
+                && current.type == EventType.ScrollWheel && diagram.Contains(mouse)
+                && !pointerOverOutputPreview && !resetView.Contains(mouse))
+            {
+                domeSimulationZoom = Mathf.Clamp(domeSimulationZoom
+                    * Mathf.Exp(-current.delta.y * 0.08f), 0.25f, 5f);
+                current.Use();
+            }
+            else if (!pointerOverCalibrationToolbar
+                     && current.type == EventType.MouseDown && current.button == 0
+                     && domeGuiEditing && settings.projectionRegionMode == 1
+                     && axisHandleHovered)
+            {
+                PushDomeGuiUndoState();
+                domeSimulationAimDragging = true;
+                domeSimulationAimLastMouse = mouse;
+                current.Use();
+            }
+            else if (!pointerOverCalibrationToolbar
+                     && current.type == EventType.MouseDown && current.button == 0
+                     && domeGuiEditing && settings.projectionRegionMode == 1
+                     && projectorHandleHovered)
+            {
+                PushDomeGuiUndoState();
+                domeSimulationProjectorDragging = true;
+                domeSimulationProjectorLastMouse = mouse;
+                current.Use();
+            }
+            else if (!pointerOverCalibrationToolbar
+                     && current.type == EventType.MouseDown && current.button == 0
+                     && diagram.Contains(mouse) && !pointerOverOutputPreview
+                     && !resetView.Contains(mouse)
+                     && !(settings.projectionRegionMode == 1
+                          && (projectorHandleHovered || axisHandleHovered)))
+            {
+                domeSimulationOrbitDragging = true;
+                domeSimulationLastMouse = mouse;
+                current.Use();
+            }
+            else if (current.type == EventType.MouseDrag
+                     && domeSimulationProjectorDragging)
+            {
+                var delta = mouse - domeSimulationProjectorLastMouse;
+                domeSimulationProjectorLastMouse = mouse;
+                var viewDelta = new Vector3(delta.x / Mathf.Max(baseScale, 0.001f),
+                    -delta.y / Mathf.Max(baseScale, 0.001f), 0f);
+                var worldDelta = Quaternion.Inverse(viewRotation) * viewDelta;
+                settings.offAxisProjectorX = Mathf.Clamp(
+                    settings.offAxisProjectorX + worldDelta.x, -2f, 2f);
+                settings.offAxisProjectorHeight = Mathf.Clamp(
+                    settings.offAxisProjectorHeight + worldDelta.y, -1.5f, 1.5f);
+                settings.offAxisProjectorDistance = Mathf.Clamp(
+                    settings.offAxisProjectorDistance - worldDelta.z, 0f, 2f);
+                status = $"端置き設置　X {settings.offAxisProjectorX:0.00} / 距離 {settings.offAxisProjectorDistance:0.00} / 高さ {settings.offAxisProjectorHeight:0.00} R";
+                current.Use();
+            }
+            else if (current.type == EventType.MouseDrag && domeSimulationAimDragging)
+            {
+                // Convert the pointer back to the visible unit sphere. The
+                // optical axis can therefore be placed directly on a guide
+                // landmark (for example the zenith) instead of being adjusted
+                // by an unrelated screen-space offset.
+                var viewX = (mouse.x - diagram.center.x) / Mathf.Max(baseScale, 0.001f);
+                var viewY = -(mouse.y - diagram.center.y) / Mathf.Max(baseScale, 0.001f);
+                var radialSquared = viewX * viewX + viewY * viewY;
+                if (radialSquared <= 1f)
+                {
+                    var currentAxisView = viewRotation * axisHit;
+                    var viewZ = Mathf.Sqrt(Mathf.Max(0f, 1f - radialSquared));
+                    if (currentAxisView.z < 0f) viewZ = -viewZ;
+                    var target = Quaternion.Inverse(viewRotation)
+                                 * new Vector3(viewX, viewY, viewZ);
+                    AimOffAxisProjectorAt(target);
+                    status = $"光軸先端を球面上で調整　Yaw {settings.offAxisAimYaw:0.0}° / 仰角 {settings.offAxisAimElevation:0.0}°";
+                }
+                domeSimulationAimLastMouse = mouse;
+                current.Use();
+            }
+            else if (current.type == EventType.MouseDrag && domeSimulationOrbitDragging)
+            {
+                var delta = mouse - domeSimulationLastMouse;
+                domeSimulationLastMouse = mouse;
+                // Treat the sphere like an object held by the pointer: when
+                // the pointer moves right, the visible sphere follows right.
+                domeSimulationYaw = NormalizeControlPreviewRotation(
+                    domeSimulationYaw - delta.x * 0.3f);
+                domeSimulationPitch = Mathf.Clamp(domeSimulationPitch
+                    - delta.y * 0.3f, -89f, 89f);
+                current.Use();
+            }
+            if (current.rawType == EventType.MouseUp)
+            {
+                domeSimulationOrbitDragging = false;
+                domeSimulationProjectorDragging = false;
+                domeSimulationAimDragging = false;
+            }
+
+            GUI.Label(new Rect(available.x + 16f, available.y + 10f,
+                    available.width - 164f, 28f),
+                settings.projectionRegionMode == 1
+                    ? "半球・端置き 3D投影シミュレーション"
+                    : "半球・中心 3D投影シミュレーション",
+                sectionTitleStyle);
+            GUI.Label(new Rect(available.x + 16f, available.y + 31f,
+                    available.width - 164f, 22f),
+                settings.projectionRegionMode == 1
+                    ? "黄色：Output矩形基準面／桃色：光軸／水色：投影範囲のみ明るい半球ガイド／空き領域：視点回転"
+                    : "黄色：Output矩形基準面／水色：投影範囲のみ明るい半球ガイド／空き領域：視点回転",
+                smallStyle);
+
+            var viewToggle = new Rect(available.xMax - 390f, available.y + 8f, 116f, 28f);
+            if (GUI.Button(viewToggle,
+                    domeSimulationShowFullSphere ? "範囲：全球確認" : "範囲：実設定"))
+                domeSimulationShowFullSphere = !domeSimulationShowFullSphere;
+            var materialToggle = new Rect(viewToggle.x - 112f, viewToggle.y, 104f, 28f);
+            if (GUI.Button(materialToggle,
+                    domeSimulationShowMaterial ? "素材：表示" : "素材：非表示"))
+                domeSimulationShowMaterial = !domeSimulationShowMaterial;
+            var guideToggle = new Rect(materialToggle.x - 144f, viewToggle.y, 136f, 28f);
+            if (GUI.Button(guideToggle,
+                    domeSimulationShowGuide ? "半球ガイド：表示" : "半球ガイド：非表示"))
+                domeSimulationShowGuide = !domeSimulationShowGuide;
+
+            if ((domeSimulationShowMaterial || domeSimulationShowGuide)
+                && domeSimulationPreviewRenderer != null)
+            {
+                GetRoomContentPreviewSource(out var previewTexture, out var previewFlipY,
+                    out var previewContentMode, out var previewWidth, out var previewHeight,
+                    out _);
+                if (!domeSimulationShowMaterial) previewTexture = null;
+                var configuredMinimumElevation = settings.projectionRegionMode == 1
+                    ? settings.offAxisMinimumElevation
+                    : 90f - settings.domeFov * 0.5f;
+                var previewMinimumElevation = domeSimulationShowFullSphere
+                    ? -90f : Mathf.Clamp(configuredMinimumElevation, -90f, 89f);
+                var rendered = domeSimulationPreviewRenderer.Render(settings,
+                    previewTexture, previewFlipY, previewContentMode, previewWidth,
+                    previewHeight, domeSimulationYaw, domeSimulationPitch, worldExtent,
+                    domeSimulationZoom, previewMinimumElevation,
+                    domeSimulationShowGuide, Mathf.RoundToInt(diagram.width),
+                    Mathf.RoundToInt(diagram.height));
+                if (rendered != null)
+                    GUI.DrawTexture(diagram, rendered, ScaleMode.StretchToFill, false);
+            }
+
+            var configuredScreenMinimum = domeSimulationShowFullSphere
+                ? -90f
+                : settings.projectionRegionMode == 1
+                    ? settings.offAxisMinimumElevation
+                    : 90f - settings.domeFov * 0.5f;
+
+            // Fixed physical screen reference. This intentionally does not
+            // move with projector aim. The Output-matched guide is rendered
+            // directly on the shaded sphere by DomeSimulationPreview.
+            // The shaded sphere already communicates the physical screen.
+            // Keep only a very faint, sparse reference cage so it does not
+            // compete with the real projected footprint or hemisphere guide.
+            var screenReferenceColor = new Color(0.76f, 0.80f, 0.86f, 0.055f);
+            void DrawPhysicalLatitude(float elevation, float thickness)
+            {
+                const int segments = 96;
+                Vector2? previous = null;
+                var elevationRadians = elevation * Mathf.Deg2Rad;
+                var radius = Mathf.Cos(elevationRadians);
+                var y = Mathf.Sin(elevationRadians);
+                for (var segment = 0; segment <= segments; segment++)
+                {
+                    var azimuth = segment * Mathf.PI * 2f / segments;
+                    var point = Project(new Vector3(radius * Mathf.Sin(azimuth), y,
+                        radius * Mathf.Cos(azimuth)));
+                    if (previous.HasValue)
+                        DrawGuiSegment(previous.Value, point, screenReferenceColor, thickness);
+                    previous = point;
+                }
+            }
+            void DrawPhysicalMeridian(float azimuthDegrees)
+            {
+                const int segments = 36;
+                Vector2? previous = null;
+                var azimuth = azimuthDegrees * Mathf.Deg2Rad;
+                for (var segment = 0; segment <= segments; segment++)
+                {
+                    var elevation = Mathf.Lerp(configuredScreenMinimum, 90f,
+                        segment / (float)segments) * Mathf.Deg2Rad;
+                    var radius = Mathf.Cos(elevation);
+                    var point = Project(new Vector3(radius * Mathf.Sin(azimuth),
+                        Mathf.Sin(elevation), radius * Mathf.Cos(azimuth)));
+                    if (previous.HasValue)
+                        DrawGuiSegment(previous.Value, point, screenReferenceColor, 0.35f);
+                    previous = point;
+                }
+            }
+            DrawPhysicalLatitude(configuredScreenMinimum, 0.55f);
+            if (configuredScreenMinimum < -0.01f) DrawPhysicalLatitude(0f, 0.45f);
+            for (var azimuth = 0; azimuth < 360; azimuth += 90)
+                DrawPhysicalMeridian(azimuth);
+
+            if (domeSimulationShowGuide)
+            {
+                var physicalZenith = Project(Vector3.up);
+                DrawCrossHandle(physicalZenith, Color.white);
+                GUI.Label(new Rect(physicalZenith.x + 13f, physicalZenith.y - 13f,
+                    230f, 24f), "実スクリーン天頂（固定）", smallStyle);
+                var horizonFront = Project(Vector3.forward);
+                DrawCrossHandle(horizonFront, new Color(0.76f, 0.84f, 0.92f, 0.85f));
+                GUI.Label(new Rect(horizonFront.x + 13f, horizonFront.y - 13f,
+                    190f, 24f), "実スクリーン水平0°（固定）", smallStyle);
+            }
+
+            // World axes make it clear which way is up and where the optical
+            // axis travels when the edge-mounted projector is aimed.
+            DrawGuiSegment(Project(new Vector3(-1.25f, 0f, 0f)),
+                Project(new Vector3(1.25f, 0f, 0f)),
+                new Color(1f, 0.20f, 0.18f, 0.75f), 2f);
+            DrawGuiSegment(Project(new Vector3(0f, -1.25f, 0f)),
+                Project(new Vector3(0f, 1.25f, 0f)),
+                new Color(0.20f, 1f, 0.30f, 0.75f), 2f);
+            DrawGuiSegment(Project(new Vector3(0f, 0f, -1.25f)),
+                Project(new Vector3(0f, 0f, 1.25f)),
+                new Color(0.18f, 0.45f, 1f, 0.75f), 2f);
+
+            // Output is a flat rectangular raster while the dome is curved.
+            // A sphere-intersection outline cannot remain the same rectangle
+            // the operator sees in Output. Place an aspect- and calibration-
+            // matched reference plane at the optical-axis/sphere intersection
+            // instead; it can be compared directly with the Output inset.
+            var rasterEdge = new Color(1f, 0.78f, 0.12f, 1f);
+            var projectionAspect = GetProjectionAspect();
+            if (hasAxisHit)
+            {
+                Vector3 rasterRight;
+                Vector3 rasterUp;
+                if (settings.projectionRegionMode == 1)
+                {
+                    var yaw = settings.offAxisAimYaw * Mathf.Deg2Rad;
+                    rasterRight = new Vector3(Mathf.Cos(yaw), 0f,
+                        -Mathf.Sin(yaw)).normalized;
+                    var rasterForward = (axisHit - projector).normalized;
+                    rasterUp = Vector3.Cross(rasterForward, rasterRight).normalized;
+                }
+                else
+                {
+                    rasterRight = Vector3.right;
+                    rasterUp = Vector3.forward;
+                }
+
+                var halfFov = Mathf.Clamp(settings.domeFov * 0.5f, 0.1f, 85f)
+                              * Mathf.Deg2Rad;
+                var circlePlaneRadius = Vector3.Distance(projector, axisHit)
+                                        * Mathf.Tan(halfFov);
+                Vector3 RasterPlanePoint(float u, float v)
+                {
+                    var point = new Vector2(
+                        (u - settings.centerX) * projectionAspect
+                        / Mathf.Max(settings.radius * settings.ellipseX, 0.0001f),
+                        (v - settings.centerY)
+                        / Mathf.Max(settings.radius * settings.ellipseY, 0.0001f));
+                    var rotation = settings.outputRotation * Mathf.Deg2Rad;
+                    var cosine = Mathf.Cos(rotation);
+                    var sine = Mathf.Sin(rotation);
+                    point = new Vector2(cosine * point.x - sine * point.y,
+                        sine * point.x + cosine * point.y);
+                    return axisHit + rasterRight * (point.x * circlePlaneRadius)
+                           + rasterUp * (point.y * circlePlaneRadius);
+                }
+
+                var rasterCorners = new[]
+                {
+                    RasterPlanePoint(0f, 1f), RasterPlanePoint(1f, 1f),
+                    RasterPlanePoint(1f, 0f), RasterPlanePoint(0f, 0f)
+                };
+                var rasterCornerGui = new Vector2[rasterCorners.Length];
+                for (var cornerIndex = 0; cornerIndex < rasterCorners.Length;
+                     cornerIndex++)
+                    rasterCornerGui[cornerIndex] = Project(rasterCorners[cornerIndex]);
+                for (var edgeIndex = 0; edgeIndex < rasterCornerGui.Length; edgeIndex++)
+                    DrawGuiSegment(rasterCornerGui[edgeIndex],
+                        rasterCornerGui[(edgeIndex + 1) % rasterCornerGui.Length],
+                        rasterEdge, 3f);
+
+                // The Output inset contains a circular domemaster inside the
+                // rectangular projector raster. Draw that same circle on the
+                // reference plane so its centre/size can be compared directly
+                // with the inset; the outer yellow quad alone cannot show this
+                // relationship.
+                const int outputCircleSegments = 96;
+                var outputCircleColor = new Color(1f, 0.92f, 0.52f, 0.92f);
+                Vector2? previousCirclePoint = null;
+                for (var circleIndex = 0; circleIndex <= outputCircleSegments;
+                     circleIndex++)
+                {
+                    var angle = circleIndex * Mathf.PI * 2f / outputCircleSegments;
+                    var worldPoint = axisHit
+                                     + rasterRight * (Mathf.Cos(angle) * circlePlaneRadius)
+                                     + rasterUp * (Mathf.Sin(angle) * circlePlaneRadius);
+                    var guiPoint = Project(worldPoint);
+                    if (previousCirclePoint.HasValue)
+                        DrawGuiSegment(previousCirclePoint.Value, guiPoint,
+                            outputCircleColor, 1.8f);
+                    previousCirclePoint = guiPoint;
+                }
+                DrawCrossHandle(axisPoint, outputCircleColor, 0.72f);
+                var frustumEdge = new Color(1f, 0.78f, 0.12f, 0.22f);
+                for (var cornerIndex = 0; cornerIndex < rasterCornerGui.Length;
+                     cornerIndex++)
+                {
+                    DrawGuiSegment(projectorPoint, rasterCornerGui[cornerIndex],
+                        frustumEdge, 1f);
+                    DrawCrossHandle(rasterCornerGui[cornerIndex], rasterEdge, 0.72f);
+                }
+                GUI.Label(new Rect(rasterCornerGui[1].x + 10f,
+                    rasterCornerGui[1].y - 13f, 230f, 24f),
+                    "Output矩形基準面（円内が実投影）", smallStyle);
+            }
+            if (hasAxisHit)
+            {
+                var opticalAxisColor = new Color(1f, 0.32f, 0.72f, 1f);
+                DrawGuiSegment(projectorPoint, axisPoint,
+                    opticalAxisColor, 3f);
+                if (settings.projectionRegionMode == 1)
+                    DrawCrossHandle(axisPoint, opticalAxisColor,
+                        axisHandleHovered ? 1.55f : 1f);
+                // Keep the label outside the circular handle hit area. Text
+                // itself must never start an aim drag.
+                GUI.Label(new Rect(axisPoint.x + 30f, axisPoint.y - 13f, 190f, 24f),
+                    settings.projectionRegionMode == 1
+                        ? axisHandleHovered ? "● 掴めます：光軸先端"
+                                            : "光軸先端（点をドラッグ）"
+                        : "光軸", smallStyle);
+            }
+
+            DrawSolidGuiRect(new Rect(projectorPoint.x - 8f, projectorPoint.y - 8f,
+                16f, 16f), new Color(0.12f, 0.76f, 1f, 1f));
+            GUI.Label(new Rect(projectorPoint.x + 30f, projectorPoint.y - 13f,
+                190f, 24f), settings.projectionRegionMode == 1
+                    ? projectorHandleHovered ? "● 掴めます：プロジェクター"
+                                             : "プロジェクター（点をドラッグ）"
+                    : "プロジェクター", smallStyle);
+            if (settings.projectionRegionMode == 1)
+                DrawCrossHandle(projectorPoint, new Color(0.12f, 0.76f, 1f, 1f),
+                    projectorHandleHovered ? 1.45f : 1f);
+            var centrePoint = Project(Vector3.zero);
+            DrawCrossHandle(centrePoint, new Color(1f, 0.25f, 0.78f, 1f));
+            GUI.Label(new Rect(centrePoint.x + 12f, centrePoint.y + 8f, 120f, 24f),
+                "球の中心", smallStyle);
+
+            // Keep a live 2D Output view beside the 3D model. This is rendered
+            // with the projector display aspect and without Control-only
+            // inspection pan/zoom, so parameter changes can be judged in both
+            // representations at the same time.
+            DrawSolidGuiRect(outputPreviewPanel, new Color(0.07f, 0.08f, 0.10f, 0.98f));
+            GUI.Label(new Rect(outputPreviewPanel.x + 9f, outputPreviewPanel.y + 7f,
+                outputPreviewPanel.width - 18f, 22f), "Output投影画面", sectionTitleStyle);
+            var outputPreviewArea = new Rect(outputPreviewPanel.x + 9f,
+                outputPreviewPanel.y + 33f, outputPreviewPanel.width - 18f,
+                outputPreviewPanel.height - 42f);
+            var outputImageRect = outputPreviewArea;
+            if (outputPreviewArea.width / Mathf.Max(outputPreviewArea.height, 1f)
+                > projectionAspectForInset)
+            {
+                outputImageRect.width = outputPreviewArea.height * projectionAspectForInset;
+                outputImageRect.x += (outputPreviewArea.width - outputImageRect.width) * 0.5f;
+            }
+            else
+            {
+                outputImageRect.height = outputPreviewArea.width / projectionAspectForInset;
+                outputImageRect.y += (outputPreviewArea.height - outputImageRect.height) * 0.5f;
+            }
+            DrawSolidGuiRect(outputImageRect, Color.black);
+            if (outputRenderer?.OperatorPreviewTexture != null)
+                GUI.DrawTexture(outputImageRect, outputRenderer.OperatorPreviewTexture,
+                    ScaleMode.StretchToFill, false);
+            var previewBorder = new Color(0.72f, 0.78f, 0.84f, 0.95f);
+            DrawGuiSegment(outputImageRect.min,
+                new Vector2(outputImageRect.xMax, outputImageRect.yMin), previewBorder, 1f);
+            DrawGuiSegment(new Vector2(outputImageRect.xMax, outputImageRect.yMin),
+                outputImageRect.max, previewBorder, 1f);
+            DrawGuiSegment(outputImageRect.max,
+                new Vector2(outputImageRect.xMin, outputImageRect.yMax), previewBorder, 1f);
+            DrawGuiSegment(new Vector2(outputImageRect.xMin, outputImageRect.yMax),
+                outputImageRect.min, previewBorder, 1f);
+
+            GUI.Label(new Rect(available.x + 16f, available.yMax - 31f,
+                    available.width - 32f, 24f),
+                settings.projectionRegionMode == 1
+                    ? $"黄：Output矩形基準面　桃：光軸　設置 ({settings.offAxisProjectorX:0.00}, {settings.offAxisProjectorHeight:0.00}, {-settings.offAxisProjectorDistance:0.00}) R　Yaw {settings.offAxisAimYaw:0.0}°／仰角 {settings.offAxisAimElevation:0.0}°　画角 {settings.domeFov:0}°"
+                    : $"黄：Output矩形基準面　球中心から投影　画角 {settings.domeFov:0}°",
+                smallStyle);
         }
 
         private void DrawRoomObserverEditor(float logicalWidth, float logicalHeight, float margin)
@@ -3742,7 +4311,12 @@ namespace DomeProjection
             else
             {
                 BeginSection("表示方向");
-                settings.yaw = Slider("Yaw", settings.yaw, -180f, 180f, settings.yaw.ToString("0.0°"), 0f);
+                settings.yaw = ContinuousYawControl("Yaw", settings.yaw, 0f);
+                GUILayout.Label("Yawは端のない横ドラッグです。投影画面上でも Option/Alt＋横ドラッグ、Q/Eで微調整できます。",
+                    smallStyle);
+                settings.materialYawKeyDegreesPerSecond = FineSlider("Q/E長押し速度",
+                    settings.materialYawKeyDegreesPerSecond, 1f, 60f, 1f,
+                    settings.materialYawKeyDegreesPerSecond.ToString("0°/秒"), 15f);
                 settings.pitch = Slider("Pitch", settings.pitch, -180f, 180f, settings.pitch.ToString("0.0°"), 180f);
                 settings.roll = Slider("Roll", settings.roll, -180f, 180f, settings.roll.ToString("0.0°"), 0f);
                 EndSection();
@@ -3778,16 +4352,38 @@ namespace DomeProjection
             controlPreviewRotation = FineSlider("確認・傾き", controlPreviewRotation,
                 -180f, 180f, 1f, controlPreviewRotation.ToString("0°"), 0f);
             if (GUILayout.Button("Outputと同じ表示に戻す")) ResetControlPreview();
+            if (!room)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("確認画面", rowLabelStyle, GUILayout.Width(82f));
+                if (GUILayout.Button("投影結果",
+                        domeSimulationVisible ? tabStyle : activeTabStyle))
+                    domeSimulationVisible = false;
+                if (GUILayout.Button("3Dシミュレーション",
+                        domeSimulationVisible ? activeTabStyle : tabStyle))
+                    domeSimulationVisible = true;
+                GUILayout.EndHorizontal();
+                GUILayout.Label("3Dでは球面・プロジェクター位置・光軸・実際の球面交点を確認できます。ドラッグで回転、ホイールで拡大縮小します。",
+                    smallStyle);
+            }
             if (offAxis)
             {
                 settings.domeFov = FineSlider("レンズ投影角", settings.domeFov,
                     30f, 360f, 1f, settings.domeFov.ToString("0°"), 120f);
+                GUILayout.Label("光軸を中心とする円錐状の全画角です。例：140°は光軸から片側約70°。実機の投影範囲を合わせる概算値です。",
+                    smallStyle);
                 settings.offAxisProjectorDistance = FineSlider("中心→設置位置",
                     settings.offAxisProjectorDistance, 0f, 2f, 0.01f,
                     settings.offAxisProjectorDistance.ToString("0.00 R"), 0.95f);
+                settings.offAxisProjectorX = FineSlider("設置位置 X",
+                    settings.offAxisProjectorX, -2f, 2f, 0.01f,
+                    settings.offAxisProjectorX.ToString("0.00 R"), 0f);
                 settings.offAxisProjectorHeight = FineSlider("設置高さ",
                     settings.offAxisProjectorHeight, -1.5f, 1.5f, 0.01f,
                     settings.offAxisProjectorHeight.ToString("0.00 R"), 0f);
+                settings.offAxisAimYaw = FineSlider("光軸の左右",
+                    settings.offAxisAimYaw, -180f, 180f, 0.5f,
+                    settings.offAxisAimYaw.ToString("0.0°"), 0f);
                 settings.offAxisAimElevation = FineSlider("光軸の仰角",
                     settings.offAxisAimElevation, -90f, 90f, 0.5f,
                     settings.offAxisAimElevation.ToString("0.0°"), 15f);
@@ -3901,13 +4497,12 @@ namespace DomeProjection
                     selected ? activeTabStyle : tabStyle, GUILayout.ExpandWidth(true))) return;
             if (settings.projectionRegionMode == mode) return;
             settings.projectionRegionMode = mode;
-            if (mode == 1) settings.ResetOffAxisProjection();
-            else if (mode == 2) settings.ResetRoomProjection();
-            else
-            {
-                settings.domeFov = 180f;
-                settings.ResetOutputCircle();
-            }
+            if (mode == 2) domeSimulationVisible = false;
+            // Selecting a mode is not a reset operation. Operators commonly
+            // switch between centre and rim layouts while comparing them; the
+            // old behaviour silently destroyed the calibrated distance, aim,
+            // FOV and output circle every time. Explicit reset buttons remain
+            // available inside each mode when defaults are actually wanted.
         }
 
         private void DrawRoomControlViewButton(int mode, string label)
@@ -3976,6 +4571,217 @@ namespace DomeProjection
             status = "前面4隅ワープをキャンセルし、開始前の設定へ戻しました";
         }
 
+        private void StartDomeGuiCalibration()
+        {
+            if (settings.projectionRegionMode >= 2) return;
+            domeGuiCalibrationStartProfile = LensCalibrationProfile.Capture(
+                "__dome_gui_calibration_start__", settings);
+            domeGuiUndoHistory.Clear();
+            domeGuiEditing = true;
+            showControls = false;
+            domeSimulationVisible = true;
+            ResetControlPreview();
+            status = settings.projectionRegionMode == 1
+                ? "プロジェクター位置と光軸を、3D上で実スクリーンへ合わせてください"
+                : "中心配置の投影範囲を3Dで確認し、既存の画角を調整できます";
+        }
+
+        private void FinishDomeGuiCalibration()
+        {
+            domeGuiEditing = false;
+            domeGuiCalibrationStartProfile = null;
+            domeGuiUndoHistory.Clear();
+            roomCalibrationViewDragging = false;
+            showControls = true;
+            SaveSettings();
+            status = "半球の既存物理パラメータを保存しました";
+        }
+
+        private void CancelDomeGuiCalibration()
+        {
+            if (domeGuiCalibrationStartProfile != null)
+                domeGuiCalibrationStartProfile.ApplyTo(settings);
+            domeGuiCalibrationStartProfile = null;
+            domeGuiUndoHistory.Clear();
+            domeGuiEditing = false;
+            roomCalibrationViewDragging = false;
+            showControls = true;
+            ResetControlPreview();
+            status = "物理配置調整をキャンセルし、開始前の設定へ戻しました";
+        }
+
+        private void PushDomeGuiUndoState()
+        {
+            if (!domeGuiEditing) return;
+            domeGuiUndoHistory.Push(LensCalibrationProfile.Capture(
+                "__dome_gui_undo__", settings));
+        }
+
+        private void UndoDomeGuiAdjustment()
+        {
+            if (!domeGuiEditing || domeGuiUndoHistory.Count == 0)
+            {
+                status = "戻せる3D調整操作はありません";
+                return;
+            }
+            domeGuiUndoHistory.Pop().ApplyTo(settings);
+            domeSimulationOrbitDragging = false;
+            domeSimulationProjectorDragging = false;
+            domeSimulationAimDragging = false;
+            status = $"直前の3D調整を戻しました（残り {domeGuiUndoHistory.Count}）";
+        }
+
+        private static Rect GetDomePhysicalCalibrationToolbarRect(float logicalWidth,
+            float logicalHeight, float margin)
+        {
+            var width = Mathf.Min(1260f, logicalWidth - margin * 2f);
+            return new Rect((logicalWidth - width) * 0.5f,
+                logicalHeight - 154f, width, 136f);
+        }
+
+        private void DrawDomePhysicalCalibrationToolbar(float logicalWidth,
+            float logicalHeight, float margin)
+        {
+            var toolbar = GetDomePhysicalCalibrationToolbarRect(logicalWidth,
+                logicalHeight, margin);
+            // A drag that started in the diagram must never keep ownership
+            // after the pointer reaches this toolbar. Otherwise IMGUI buttons
+            // and sliders appear visible but receive no click/drag events.
+            if (Event.current.type == EventType.MouseDown
+                && toolbar.Contains(GetLogicalMousePosition()))
+            {
+                domeSimulationOrbitDragging = false;
+                domeSimulationProjectorDragging = false;
+                domeSimulationAimDragging = false;
+                // One toolbar gesture (button or slider drag) is one undo
+                // step. Capturing on MouseDown avoids hundreds of snapshots
+                // while a slider is moving.
+                PushDomeGuiUndoState();
+            }
+            DrawSolidGuiRect(toolbar, new Color(0.10f, 0.12f, 0.15f, 0.97f));
+            GUI.Label(new Rect(toolbar.x + 14f, toolbar.y + 8f, 330f, 26f),
+                settings.projectionRegionMode == 1
+                    ? "半球・端置き　3D現場合わせ"
+                    : "半球・中心　3D現場合わせ", sectionTitleStyle);
+            GUI.Label(new Rect(toolbar.x + 14f, toolbar.y + 33f,
+                    toolbar.width - 500f, 22f),
+                settings.projectionRegionMode == 1
+                    ? "桃点：光軸方向。点・プロジェクターをドラッグすると既存の物理配置値だけを変更／Cmd・Ctrl+Z：元に戻す。"
+                    : "中心配置は確認表示。レンズ投影角を調整／空き領域：視点回転／Cmd・Ctrl+Z：元に戻す。",
+                smallStyle);
+
+            var aimZenithRect = new Rect(toolbar.xMax - 438f, toolbar.y + 8f, 104f, 30f);
+            var cancelRect = new Rect(toolbar.xMax - 326f, toolbar.y + 8f, 100f, 30f);
+            var resetRect = new Rect(toolbar.xMax - 218f, toolbar.y + 8f, 100f, 30f);
+            var finishRect = new Rect(toolbar.xMax - 110f, toolbar.y + 8f, 96f, 30f);
+
+            bool ToolbarButton(Rect rect, string label)
+            {
+                // Standard IMGUI buttons fire on MouseUp. A stale hotControl
+                // from a 3D drag can swallow that MouseUp, leaving a button
+                // that visibly depresses but does nothing. Register the same
+                // action directly on MouseDown as a deterministic fallback.
+                var current = Event.current;
+                var directPress = current.type == EventType.MouseDown
+                                  && current.button == 0
+                                  && rect.Contains(GetLogicalMousePosition());
+                var standardPress = GUI.Button(rect, label);
+                if (directPress && current.type != EventType.Used) current.Use();
+                return directPress || standardPress;
+            }
+
+            if (ToolbarButton(cancelRect, "調整キャンセル"))
+                CancelDomeGuiCalibration();
+            if (!domeGuiEditing) return;
+            if (settings.projectionRegionMode == 1
+                && ToolbarButton(aimZenithRect, "光軸を天頂へ"))
+            {
+                AimOffAxisProjectorAt(Vector3.up);
+                status = "プロジェクターの光軸を半球ガイドの天頂へ合わせました";
+            }
+            if (ToolbarButton(resetRect, "物理配置を既定"))
+            {
+                if (settings.projectionRegionMode == 1) settings.ResetOffAxisProjection();
+                else settings.domeFov = 180f;
+                status = "物理投影パラメータを既定値へ戻しました";
+            }
+            if (ToolbarButton(finishRect, "調整完了"))
+            {
+                FinishDomeGuiCalibration();
+                return;
+            }
+
+            float PhysicalSlider(string label, float value, float minimum,
+                float maximum, string format, Rect rect)
+            {
+                GUI.Label(new Rect(rect.x, rect.y, 92f, 24f), label, smallStyle);
+                value = GUI.HorizontalSlider(new Rect(rect.x + 94f, rect.y + 4f,
+                    rect.width - 164f, 18f), value, minimum, maximum);
+                GUI.Label(new Rect(rect.xMax - 64f, rect.y, 64f, 24f),
+                    value.ToString(format), smallStyle);
+                return value;
+            }
+
+            var columnWidth = (toolbar.width - 42f) / 3f;
+            var row1Y = toolbar.y + 66f;
+            var row2Y = toolbar.y + 98f;
+            settings.domeFov = PhysicalSlider("レンズ投影角", settings.domeFov,
+                30f, 360f, "0°", new Rect(toolbar.x + 14f, row1Y, columnWidth, 24f));
+            if (settings.projectionRegionMode == 1)
+            {
+                settings.offAxisProjectorX = PhysicalSlider("設置位置 X",
+                    settings.offAxisProjectorX, -2f, 2f, "0.00 R",
+                    new Rect(toolbar.x + 14f, row2Y, columnWidth, 24f));
+                settings.offAxisProjectorDistance = PhysicalSlider("中心→設置",
+                    settings.offAxisProjectorDistance, 0f, 2f, "0.00 R",
+                    new Rect(toolbar.x + 21f + columnWidth, row1Y, columnWidth, 24f));
+                settings.offAxisProjectorHeight = PhysicalSlider("設置高さ",
+                    settings.offAxisProjectorHeight, -1.5f, 1.5f, "0.00 R",
+                    new Rect(toolbar.x + 21f + columnWidth, row2Y, columnWidth, 24f));
+                settings.offAxisAimYaw = PhysicalSlider("光軸 Yaw",
+                    settings.offAxisAimYaw, -180f, 180f, "0.0°",
+                    new Rect(toolbar.x + 28f + columnWidth * 2f, row1Y,
+                        columnWidth, 24f));
+                settings.offAxisAimElevation = PhysicalSlider("光軸 仰角",
+                    settings.offAxisAimElevation, -90f, 90f, "0.0°",
+                    new Rect(toolbar.x + 28f + columnWidth * 2f, row2Y,
+                        columnWidth, 24f));
+            }
+        }
+
+        private void AimOffAxisProjectorAt(Vector3 target)
+        {
+            var projector = new Vector3(settings.offAxisProjectorX,
+                settings.offAxisProjectorHeight, -settings.offAxisProjectorDistance);
+            var direction = (target - projector).normalized;
+            var horizontal = Mathf.Sqrt(direction.x * direction.x
+                                        + direction.z * direction.z);
+            settings.offAxisAimYaw = Mathf.Clamp(
+                Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg,
+                -180f, 180f);
+            settings.offAxisAimElevation = Mathf.Clamp(
+                Mathf.Atan2(direction.y, horizontal) * Mathf.Rad2Deg,
+                -90f, 90f);
+        }
+
+        private void DrawCrossHandle(Vector2 point, Color color)
+        {
+            DrawCrossHandle(point, color, 1f);
+        }
+
+        private void DrawCrossHandle(Vector2 point, Color color, float scale)
+        {
+            scale = Mathf.Max(scale, 0.5f);
+            DrawSolidGuiRect(new Rect(point.x - 12f * scale, point.y - 2f * scale,
+                24f * scale, 4f * scale), color);
+            DrawSolidGuiRect(new Rect(point.x - 2f * scale, point.y - 12f * scale,
+                4f * scale, 24f * scale), color);
+            DrawSolidGuiRect(new Rect(point.x - 5f * scale, point.y - 5f * scale,
+                10f * scale, 10f * scale), Color.white);
+            DrawSolidGuiRect(new Rect(point.x - 3f * scale, point.y - 3f * scale,
+                6f * scale, 6f * scale), color);
+        }
+
         private void DrawCalibrationPanel()
         {
             BeginSection("校正表示");
@@ -4001,6 +4807,20 @@ namespace DomeProjection
                 0.05f, settings.gridOpacity.ToString("0.00"), 1f);
             settings.gridLineWidth = FineSlider("線の太さ", settings.gridLineWidth, 0.25f, 1.5f, 0.05f, settings.gridLineWidth.ToString("0.00"), 0.65f);
             settings.showOrientationMarkers = GUILayout.Toggle(settings.showOrientationMarkers, "方位色マーカー（上:赤 右:緑 下:青 左:黄）");
+            if (settings.projectionRegionMode < 2)
+            {
+                GUILayout.Space(6f);
+                const float domeGuiButtonHeight = 32f;
+                if (GUILayout.Button(settings.projectionRegionMode == 1
+                        ? "端置きの物理配置を3Dで調整"
+                        : "中心配置の投影範囲を3Dで確認", activeTabStyle,
+                        GUILayout.Height(domeGuiButtonHeight)))
+                    StartDomeGuiCalibration();
+                GUILayout.Label(settings.projectionRegionMode == 1
+                    ? "既存の設置位置・光軸・画角だけを3D上で確認・調整します。追加のメッシュ歪みは使いません。"
+                    : "既存の画角と投影範囲を3Dで確認します。追加のメッシュ歪みは使いません。",
+                    smallStyle);
+            }
             EndSection();
 
             BeginSection(settings.projectionRegionMode == 2 ? "出力範囲" : "出力円");
@@ -4756,6 +5576,24 @@ namespace DomeProjection
                     selectedPlaylistEntryIndex = entryRemoveIndex;
                     RemovePlaylistEntry();
                 }
+                if (selectedPlaylistEntryIndex >= 0
+                    && selectedPlaylistEntryIndex < playlist.materialIds.Count)
+                {
+                    var selectedEntryMaterial = FindMaterial(
+                        playlist.materialIds[selectedPlaylistEntryIndex]);
+                    if (IsStillImageMaterial(selectedEntryMaterial))
+                    {
+                        var previousDuration = playlist.entryDurationSeconds[selectedPlaylistEntryIndex];
+                        var duration = FineSlider("選択画像の表示時間", previousDuration,
+                            0.5f, 120f, 0.5f, previousDuration.ToString("0.0秒"),
+                            DomePlaylistDefinition.DefaultStillImageDurationSeconds);
+                        if (Mathf.Abs(duration - previousDuration) > 0.001f)
+                        {
+                            playlist.entryDurationSeconds[selectedPlaylistEntryIndex] = duration;
+                            SavePlaylistCatalog();
+                        }
+                    }
+                }
                 GUILayout.BeginHorizontal();
                 if (GUILayout.Button(new GUIContent("|◀ 前へ", "前の素材")))
                     AdvanceActivePlaylist(-1);
@@ -4804,8 +5642,9 @@ namespace DomeProjection
             for (var i = 0; i < count; i++)
             {
                 var material = FindMaterial(playlist.materialIds[i]);
-                if (material == null || material.durationSeconds <= 0f) continue;
-                knownDurationTotal += material.durationSeconds;
+                var duration = PlaylistEntryDuration(playlist, i, material);
+                if (duration <= 0f) continue;
+                knownDurationTotal += duration;
                 knownDurationCount++;
             }
             var fallbackDuration = knownDurationCount > 0
@@ -4814,8 +5653,9 @@ namespace DomeProjection
             for (var i = 0; i < count; i++)
             {
                 var material = FindMaterial(playlist.materialIds[i]);
-                weights[i] = material != null && material.durationSeconds > 0f
-                    ? material.durationSeconds
+                var duration = PlaylistEntryDuration(playlist, i, material);
+                weights[i] = duration > 0f
+                    ? duration
                     : fallbackDuration;
                 totalWeight += weights[i];
             }
@@ -4825,6 +5665,7 @@ namespace DomeProjection
             var thumbX = -1f;
             for (var i = 0; i < count; i++)
             {
+                var material = FindMaterial(playlist.materialIds[i]);
                 var width = i == count - 1
                     ? bar.xMax - x
                     : bar.width * weights[i] / Mathf.Max(totalWeight, 0.001f);
@@ -4838,6 +5679,9 @@ namespace DomeProjection
                     var progress = 1f;
                     if (video != null && video.IsPrepared && !video.IsStillImage && video.Duration > 0d)
                         progress = Mathf.Clamp01((float)(video.Time / video.Duration));
+                    else if (video != null && video.IsPrepared && video.IsStillImage)
+                        progress = Mathf.Clamp01(activeStillImageElapsed
+                            / Mathf.Max(0.5f, PlaylistEntryDuration(playlist, i, material)));
                     GUI.DrawTexture(new Rect(segment.x, segment.y,
                             Mathf.Max(2f, segment.width * progress), segment.height),
                         chapterCurrentTexture, ScaleMode.StretchToFill);
@@ -4877,9 +5721,14 @@ namespace DomeProjection
             }
 
             var currentMaterial = FindMaterial(playlist.materialIds[activePlaylistEntryIndex]);
-            var time = video != null && video.IsPrepared && !video.IsStillImage
-                ? "  " + FormatTime(video.Time) + " / " + FormatTime(video.Duration)
-                : string.Empty;
+            var time = string.Empty;
+            if (video != null && video.IsPrepared && !video.IsStillImage)
+                time = "  " + FormatTime(video.Time) + " / " + FormatTime(video.Duration);
+            else if (video != null && video.IsPrepared && video.IsStillImage)
+            {
+                var duration = PlaylistEntryDuration(playlist, activePlaylistEntryIndex, currentMaterial);
+                time = "  " + FormatTime(activeStillImageElapsed) + " / " + FormatTime(duration);
+            }
             GUILayout.Label((activePlaylistCompleted ? "再生完了 " : "再生中 ")
                 + (activePlaylistEntryIndex + 1) + " / " + count + "  "
                 + TruncateLabel(currentMaterial?.name ?? "素材不明", large ? 76 : 34) + time,
@@ -4977,6 +5826,8 @@ namespace DomeProjection
 
         private double PlaylistSeekPreviewTime()
         {
+            if (video != null && video.IsPrepared && video.IsStillImage)
+                return activeStillImageElapsed;
             if (playlistSeekDragging && activePlaylistIndex == playlistSeekDraggingPlaylistIndex
                 && activePlaylistEntryIndex == playlistSeekPreviewEntryIndex
                 && video != null && video.IsPrepared && !video.IsStillImage && video.Duration > 0d)
@@ -5024,11 +5875,15 @@ namespace DomeProjection
 
             pendingPlaylistSeekFraction = -1f;
             pendingPlaylistSeekMaterialId = string.Empty;
-            if (video.IsStillImage || video.Duration <= 0d)
+            if (video.IsStillImage)
             {
-                mediaShouldPlayWhenVisible = false;
+                var material = FindMaterial(materialId);
+                activeStillImageElapsed = PlaylistEntryDuration(playlist, entryIndex, material) * fraction;
+                mediaShouldPlayWhenVisible = final && resumePlaylistAfterSeek;
+                ApplyControlMediaPlaybackState();
                 return;
             }
+            if (video.Duration <= 0d) return;
 
             var target = video.Duration * fraction;
             if (final)
@@ -5185,7 +6040,16 @@ namespace DomeProjection
             var deleted = materialCatalog.materials[selectedMaterialIndex];
             materialCatalog.materials.RemoveAt(selectedMaterialIndex);
             foreach (var playlist in playlistCatalog.playlists)
-                playlist.materialIds.RemoveAll(id => string.Equals(id, deleted.id, StringComparison.Ordinal));
+            {
+                for (var entryIndex = playlist.materialIds.Count - 1; entryIndex >= 0; entryIndex--)
+                {
+                    if (!string.Equals(playlist.materialIds[entryIndex], deleted.id,
+                            StringComparison.Ordinal)) continue;
+                    playlist.materialIds.RemoveAt(entryIndex);
+                    if (entryIndex < playlist.entryDurationSeconds.Count)
+                        playlist.entryDurationSeconds.RemoveAt(entryIndex);
+                }
+            }
             selectedMaterialIndex = materialCatalog.materials.Count == 0
                 ? -1
                 : Mathf.Clamp(selectedMaterialIndex, 0, materialCatalog.materials.Count - 1);
@@ -5297,6 +6161,7 @@ namespace DomeProjection
                 || selectedMaterialIndex < 0 || selectedMaterialIndex >= materialCatalog.materials.Count) return;
             var playlist = playlistCatalog.playlists[selectedPlaylistIndex];
             playlist.materialIds.Add(materialCatalog.materials[selectedMaterialIndex].id);
+            playlist.entryDurationSeconds.Add(DomePlaylistDefinition.DefaultStillImageDurationSeconds);
             selectedPlaylistEntryIndex = playlist.materialIds.Count - 1;
             SavePlaylistCatalog();
             status = "プレイリストへ追加しました: " + materialCatalog.materials[selectedMaterialIndex].name;
@@ -5305,12 +6170,15 @@ namespace DomeProjection
         private void MovePlaylistEntry(int direction)
         {
             if (selectedPlaylistIndex < 0 || selectedPlaylistIndex >= playlistCatalog.playlists.Count) return;
-            var entries = playlistCatalog.playlists[selectedPlaylistIndex].materialIds;
+            var playlist = playlistCatalog.playlists[selectedPlaylistIndex];
+            var entries = playlist.materialIds;
             if (selectedPlaylistEntryIndex < 0 || selectedPlaylistEntryIndex >= entries.Count) return;
             var source = selectedPlaylistEntryIndex;
             var destination = Mathf.Clamp(source + direction, 0, entries.Count - 1);
             if (destination == source) return;
             (entries[source], entries[destination]) = (entries[destination], entries[source]);
+            (playlist.entryDurationSeconds[source], playlist.entryDurationSeconds[destination]) =
+                (playlist.entryDurationSeconds[destination], playlist.entryDurationSeconds[source]);
 
             // The transport follows the exact slot that is currently playing.
             // Without updating this index, reordering either the active row or
@@ -5330,9 +6198,11 @@ namespace DomeProjection
         private void RemovePlaylistEntry()
         {
             if (selectedPlaylistIndex < 0 || selectedPlaylistIndex >= playlistCatalog.playlists.Count) return;
-            var entries = playlistCatalog.playlists[selectedPlaylistIndex].materialIds;
+            var playlist = playlistCatalog.playlists[selectedPlaylistIndex];
+            var entries = playlist.materialIds;
             if (selectedPlaylistEntryIndex < 0 || selectedPlaylistEntryIndex >= entries.Count) return;
             entries.RemoveAt(selectedPlaylistEntryIndex);
+            playlist.entryDurationSeconds.RemoveAt(selectedPlaylistEntryIndex);
             selectedPlaylistEntryIndex = entries.Count == 0
                 ? -1
                 : Mathf.Clamp(selectedPlaylistEntryIndex, 0, entries.Count - 1);
@@ -5393,6 +6263,13 @@ namespace DomeProjection
                 return;
             }
 
+            if (video != null && video.IsPrepared && video.IsStillImage)
+            {
+                var material = FindMaterial(playlist.materialIds[activePlaylistEntryIndex]);
+                var duration = PlaylistEntryDuration(playlist, activePlaylistEntryIndex, material);
+                if (activeStillImageElapsed >= duration - 0.01f) activeStillImageElapsed = 0f;
+            }
+
             var effectivelyPlaying = mediaShouldPlayWhenVisible && !settings.showIdleScreen;
             mediaShouldPlayWhenVisible = !effectivelyPlaying;
             if (mediaShouldPlayWhenVisible) settings.showIdleScreen = false;
@@ -5401,6 +6278,12 @@ namespace DomeProjection
 
         private void UpdatePlaylistTransition()
         {
+            if (activePlaylistIndex >= 0 && activePlaylistIndex < playlistCatalog.playlists.Count
+                && video != null && video.IsPrepared && video.IsStillImage
+                && mediaShouldPlayWhenVisible && !settings.showIdleScreen
+                && !playlistSeekDragging && !activePlaylistCompleted)
+                activeStillImageElapsed += Time.unscaledDeltaTime;
+
             if (playlistTransitionPhase == 2)
             {
                 var playlist = activePlaylistIndex >= 0 && activePlaylistIndex < playlistCatalog.playlists.Count
@@ -5416,19 +6299,19 @@ namespace DomeProjection
             if (playlistTransitionPhase == 1)
             {
                 if (activePlaylistIndex < 0 || activePlaylistIndex >= playlistCatalog.playlists.Count
-                    || video == null || !video.IsPrepared || video.IsStillImage || video.Duration <= 0d)
+                    || video == null || !video.IsPrepared)
                 {
                     ResetPlaylistTransition();
                     return;
                 }
                 var playlist = playlistCatalog.playlists[activePlaylistIndex];
                 var halfDuration = Mathf.Max(0.1f, playlist.transitionSeconds * 0.5f);
-                var remaining = Mathf.Max(0f, (float)(video.Duration - video.Time));
+                var remaining = ActivePlaylistEntryRemainingSeconds(playlist);
                 playlistTransitionOpacity = Mathf.Clamp01(remaining / halfDuration);
                 if (remaining <= 0.02f)
                 {
                     playlistTransitionOpacity = 0f;
-                    if (AdvanceActivePlaylist(1))
+                    if (AdvancePlaylistAfterCompletion())
                     {
                         playlistTransitionPhase = 2;
                         playlistFadeInStarted = Time.unscaledTime;
@@ -5444,21 +6327,49 @@ namespace DomeProjection
             playlistTransitionOpacity = 1f;
             if (!mediaShouldPlayWhenVisible || activePlaylistIndex < 0
                 || activePlaylistIndex >= playlistCatalog.playlists.Count
-                || video == null || !video.IsPrepared || video.IsStillImage || !video.IsPlaying
-                || video.Duration <= 0d) return;
+                || video == null || !video.IsPrepared) return;
             var activePlaylist = playlistCatalog.playlists[activePlaylistIndex];
             if (!activePlaylist.autoAdvance) return;
+            if (!video.IsStillImage && (!video.IsPlaying || video.Duration <= 0d)) return;
+            var remainingTime = ActivePlaylistEntryRemainingSeconds(activePlaylist);
             var nextIndex = GetNextPlaylistEntryIndex(activePlaylist, activePlaylistEntryIndex);
-            if (nextIndex < 0) return;
-            var remainingTime = video.Duration - video.Time;
+            if (nextIndex < 0)
+            {
+                if (video.IsStillImage && remainingTime <= 0f) FinishCompletedPlaylist();
+                return;
+            }
             var preloadLeadTime = Mathf.Max(3f, activePlaylist.transitionSeconds + 1f);
             if (remainingTime <= preloadLeadTime && !IsPlaylistEntryPreloaded(activePlaylist, nextIndex))
                 PrepareNextPlaylistEntry();
             if (activePlaylist.transitionMode != 1
-                || !IsPlaylistEntryPreloaded(activePlaylist, nextIndex)) return;
+                || !IsPlaylistEntryPreloaded(activePlaylist, nextIndex))
+            {
+                if (video.IsStillImage && remainingTime <= 0f) AdvancePlaylistAfterCompletion();
+                return;
+            }
             var fadeOutDuration = Mathf.Max(0.1f, activePlaylist.transitionSeconds * 0.5f);
             if (remainingTime <= fadeOutDuration)
                 playlistTransitionPhase = 1;
+        }
+
+        private float ActivePlaylistEntryRemainingSeconds(DomePlaylistDefinition playlist)
+        {
+            if (playlist == null || activePlaylistEntryIndex < 0
+                || activePlaylistEntryIndex >= playlist.materialIds.Count || video == null) return 0f;
+            if (!video.IsStillImage)
+                return video.Duration > 0d ? Mathf.Max(0f, (float)(video.Duration - video.Time)) : 0f;
+            var material = FindMaterial(playlist.materialIds[activePlaylistEntryIndex]);
+            return Mathf.Max(0f,
+                PlaylistEntryDuration(playlist, activePlaylistEntryIndex, material) - activeStillImageElapsed);
+        }
+
+        private void FinishCompletedPlaylist()
+        {
+            if (AdvancePlaylistAfterCompletion()) return;
+            mediaShouldPlayWhenVisible = false;
+            SetIdleScreenVisible(true);
+            status = "プレイリストの再生が完了しました。中央の再生ボタンで先頭から再生できます";
+            SaveSettings();
         }
 
         private void ResetPlaylistTransition()
@@ -5470,9 +6381,29 @@ namespace DomeProjection
         private int GetNextPlaylistEntryIndex(DomePlaylistDefinition playlist, int currentIndex)
         {
             if (playlist == null || playlist.materialIds.Count == 0) return -1;
+            if (playlist.loopMode == 2)
+                return Mathf.Clamp(currentIndex, 0, playlist.materialIds.Count - 1);
             var next = currentIndex + 1;
             if (next < playlist.materialIds.Count) return next;
-            return playlist.loop ? 0 : -1;
+            return playlist.loopMode == 1 ? 0 : -1;
+        }
+
+        private bool AdvancePlaylistAfterCompletion()
+        {
+            if (activePlaylistIndex < 0 || activePlaylistIndex >= playlistCatalog.playlists.Count)
+                return false;
+            var playlist = playlistCatalog.playlists[activePlaylistIndex];
+            if (playlist.loopMode != 2) return AdvanceActivePlaylist(1);
+            if (activePlaylistEntryIndex < 0
+                || activePlaylistEntryIndex >= playlist.materialIds.Count) return false;
+
+            activePlaylistCompleted = false;
+            activeStillImageElapsed = 0f;
+            pendingPlaylistSeekFraction = -1f;
+            pendingPlaylistSeekMaterialId = string.Empty;
+            mediaShouldPlayWhenVisible = true;
+            settings.showIdleScreen = false;
+            return LoadActivePlaylistEntry();
         }
 
         private bool IsPlaylistEntryPreloaded(DomePlaylistDefinition playlist, int entryIndex)
@@ -5545,7 +6476,7 @@ namespace DomeProjection
             if (playlist.materialIds.Count == 0) return false;
             if (activePlaylistEntryIndex < 0 || activePlaylistEntryIndex >= playlist.materialIds.Count)
             {
-                if (!playlist.loop)
+                if (playlist.loopMode != 1)
                 {
                     // Keep the playlist and its chapters attached to the
                     // transport after reaching the end. Pressing Play can then
@@ -5593,6 +6524,7 @@ namespace DomeProjection
             selectedMaterialIndex = materialCatalog.materials.IndexOf(material);
             materialNameField = material.name;
             activePlaylistCompleted = false;
+            activeStillImageElapsed = 0f;
             if (IsPlaylistEntryPreloaded(playlist, activePlaylistEntryIndex))
                 return ActivatePreloadedPlaylistEntry(material);
             LoadMaterial(material, true);
@@ -5628,6 +6560,27 @@ namespace DomeProjection
         {
             return materialCatalog.materials.Find(item =>
                 string.Equals(item.id, id, StringComparison.Ordinal));
+        }
+
+        private static bool IsStillImageMaterial(DomeMaterialDefinition material)
+        {
+            if (material == null) return false;
+            var extension = Path.GetExtension(material.path ?? string.Empty).ToLowerInvariant();
+            return extension == ".jpg" || extension == ".jpeg" || extension == ".png";
+        }
+
+        private static float PlaylistEntryDuration(DomePlaylistDefinition playlist, int entryIndex,
+            DomeMaterialDefinition material)
+        {
+            if (playlist == null || entryIndex < 0 || entryIndex >= playlist.materialIds.Count) return 0f;
+            if (IsStillImageMaterial(material))
+            {
+                if (playlist.entryDurationSeconds != null
+                    && entryIndex < playlist.entryDurationSeconds.Count)
+                    return Mathf.Clamp(playlist.entryDurationSeconds[entryIndex], 0.5f, 3600f);
+                return DomePlaylistDefinition.DefaultStillImageDurationSeconds;
+            }
+            return material != null ? Mathf.Max(0f, material.durationSeconds) : 0f;
         }
 
         private void DeleteSelectedPlaylist()
@@ -5937,6 +6890,108 @@ namespace DomeProjection
             return Mathf.Clamp(value, min, max);
         }
 
+        private float ContinuousYawControl(string label, float value, float defaultValue)
+        {
+            GUILayout.BeginHorizontal(GUILayout.Height(30f));
+            GUILayout.Label(label, rowLabelStyle, GUILayout.Width(82f));
+            if (GUILayout.Button("−", GUILayout.Width(24f))) value -= 1f;
+            var rect = GUILayoutUtility.GetRect(132f, 28f,
+                GUILayout.Width(132f), GUILayout.Height(28f));
+            value = DrawContinuousAngleEncoder(rect, value);
+            if (GUILayout.Button("+", GUILayout.Width(24f))) value += 1f;
+            GUILayout.Label(value.ToString("0.0°"), rowLabelStyle, GUILayout.Width(66f));
+            if (GUILayout.Button("既定", GUILayout.Width(40f))) value = defaultValue;
+            GUILayout.EndHorizontal();
+            return SanitizeContinuousYaw(value);
+        }
+
+        private float DrawContinuousAngleEncoder(Rect rect, float value)
+        {
+            var controlId = GUIUtility.GetControlID(0x79A011, FocusType.Passive, rect);
+            var current = Event.current;
+            if (GUI.enabled)
+            {
+                if (current.type == EventType.MouseDown && current.button == 0
+                    && rect.Contains(current.mousePosition))
+                {
+                    GUIUtility.hotControl = controlId;
+                    materialYawLastMouse = current.mousePosition;
+                    current.Use();
+                }
+                else if (current.type == EventType.MouseDrag && GUIUtility.hotControl == controlId)
+                {
+                    var sensitivity = current.shift ? 0.05f : 0.25f;
+                    // Treat the encoder like a surface held by the pointer:
+                    // dragging it right pulls the displayed panorama right.
+                    value -= (current.mousePosition.x - materialYawLastMouse.x) * sensitivity;
+                    materialYawLastMouse = current.mousePosition;
+                    current.Use();
+                }
+                else if (current.rawType == EventType.MouseUp && GUIUtility.hotControl == controlId)
+                {
+                    GUIUtility.hotControl = 0;
+                    current.Use();
+                }
+            }
+
+            GUI.Box(rect, GUIContent.none, sliderStyle);
+            var phase = Mathf.Repeat(value, 20f) / 20f;
+            for (var index = -1; index <= 6; index++)
+            {
+                var x = rect.x + (index + phase) * rect.width / 5f;
+                if (x <= rect.x + 2f || x >= rect.xMax - 2f) continue;
+                DrawSolidGuiRect(new Rect(x - 1f, rect.y + 5f, 2f, rect.height - 10f),
+                    new Color(0.42f, 0.70f, 0.88f, 0.72f));
+            }
+            DrawSolidGuiRect(new Rect(rect.center.x - 1.5f, rect.y + 2f, 3f, rect.height - 4f),
+                new Color(0.72f, 0.92f, 1f, 1f));
+            GUI.Label(rect, "◀  連続回転  ▶", chapterLabelStyle);
+            return SanitizeContinuousYaw(value);
+        }
+
+        private static float SanitizeContinuousYaw(float value)
+        {
+            return float.IsNaN(value) || float.IsInfinity(value) ? 0f : value;
+        }
+
+        private bool CanAdjustMaterialYaw()
+        {
+            return settings.sourceMode == 0 && !IsFlatContent() && !IsAllSkyCircularContent()
+                   && settings.projectionRegionMode != 2 && !domeGuiEditing;
+        }
+
+        private void HandleMaterialYawDragGesture()
+        {
+            var current = Event.current;
+            if (!CanAdjustMaterialYaw())
+            {
+                materialYawDragging = false;
+                return;
+            }
+
+            var mouse = GetLogicalMousePosition();
+            var overControlPanel = showControls && panelAreaRect.Contains(mouse);
+            if (current.type == EventType.MouseDown && current.button == 0 && current.alt
+                && !overControlPanel)
+            {
+                materialYawDragging = true;
+                materialYawLastMouse = mouse;
+                current.Use();
+                return;
+            }
+            if (current.type == EventType.MouseDrag && materialYawDragging)
+            {
+                var sensitivity = current.shift ? 0.05f : 0.25f;
+                settings.yaw = SanitizeContinuousYaw(settings.yaw
+                    - (mouse.x - materialYawLastMouse.x) * sensitivity);
+                materialYawLastMouse = mouse;
+                status = $"表示Yaw {settings.yaw:0.0}°";
+                current.Use();
+                return;
+            }
+            if (current.rawType == EventType.MouseUp) materialYawDragging = false;
+        }
+
         private static Rect ReserveCenteredSliderRect(float width = 0f)
         {
             var lane = width > 0f
@@ -6011,6 +7066,13 @@ namespace DomeProjection
             // Never consume text-editing keys as app shortcuts: without this,
             // typing e.g. "test1" switches to tab 1 before '1' reaches the field.
             if (textInputFocused || IsTextInputFocused()) return;
+            if (current.keyCode == KeyCode.Z && (current.control || current.command)
+                && domeGuiEditing)
+            {
+                UndoDomeGuiAdjustment();
+                current.Use();
+                return;
+            }
             switch (current.keyCode)
             {
                 case KeyCode.Space:
@@ -6061,11 +7123,15 @@ namespace DomeProjection
                     current.Use();
                     break;
                 case KeyCode.V:
-                    if (settings.projectionRegionMode != 2) break;
-                    if (roomWarpEditing)
-                        roomCalibrationShowOverview = !roomCalibrationShowOverview;
+                    if (settings.projectionRegionMode == 2)
+                    {
+                        if (roomWarpEditing)
+                            roomCalibrationShowOverview = !roomCalibrationShowOverview;
+                        else
+                            settings.roomControlViewMode = settings.roomControlViewMode == 1 ? 0 : 1;
+                    }
                     else
-                        settings.roomControlViewMode = settings.roomControlViewMode == 1 ? 0 : 1;
+                        domeSimulationVisible = !domeSimulationVisible;
                     current.Use();
                     break;
                 case KeyCode.C:
@@ -6085,8 +7151,9 @@ namespace DomeProjection
                     SetSourceMode(1);
                     current.Use();
                     break;
-                case KeyCode.R:
+                case KeyCode.R when current.shift && (current.control || current.command):
                     settings.ResetGeometry();
+                    status = "投影ジオメトリ全体を初期化しました";
                     current.Use();
                     break;
                 case KeyCode.O when current.control || current.command:
@@ -6094,6 +7161,12 @@ namespace DomeProjection
                     current.Use();
                     break;
                 case KeyCode.Escape:
+                    if (domeGuiEditing)
+                    {
+                        CancelDomeGuiCalibration();
+                        current.Use();
+                        break;
+                    }
                     if (Screen.fullScreenMode != FullScreenMode.Windowed)
                     {
                         settings.startMaximized = false;
@@ -6123,6 +7196,64 @@ namespace DomeProjection
                     current.Use();
                     break;
             }
+        }
+
+        private void UpdateMaterialYawKeyHold()
+        {
+            if (textInputFocused || !CanAdjustMaterialYaw())
+            {
+                materialYawQHeld = materialYawEHeld = false;
+                return;
+            }
+
+            // Read the physical key state every frame. IMGUI KeyDown repeats
+            // arrive only at the OS repeat interval and make one-degree steps
+            // visibly jump; frame-time integration stays smooth and keeps the
+            // same speed on macOS and Windows regardless of repeat settings.
+            var qDown = Input.GetKey(KeyCode.Q);
+            var eDown = Input.GetKey(KeyCode.E);
+            if (qDown && !materialYawQHeld)
+            {
+                materialYawQHeld = true;
+                materialYawQHoldStarted = Time.unscaledTime;
+            }
+            else if (!qDown && materialYawQHeld)
+            {
+                if (Time.unscaledTime - materialYawQHoldStarted < MaterialYawKeyHoldDelay)
+                    ApplyMaterialYawShortPress(-1f);
+                materialYawQHeld = false;
+            }
+
+            if (eDown && !materialYawEHeld)
+            {
+                materialYawEHeld = true;
+                materialYawEHoldStarted = Time.unscaledTime;
+            }
+            else if (!eDown && materialYawEHeld)
+            {
+                if (Time.unscaledTime - materialYawEHoldStarted < MaterialYawKeyHoldDelay)
+                    ApplyMaterialYawShortPress(1f);
+                materialYawEHeld = false;
+            }
+
+            var direction = 0f;
+            if (materialYawQHeld
+                && Time.unscaledTime - materialYawQHoldStarted >= MaterialYawKeyHoldDelay)
+                direction -= 1f;
+            if (materialYawEHeld
+                && Time.unscaledTime - materialYawEHoldStarted >= MaterialYawKeyHoldDelay)
+                direction += 1f;
+            if (Mathf.Approximately(direction, 0f)) return;
+
+            settings.yaw = SanitizeContinuousYaw(settings.yaw
+                + direction * settings.materialYawKeyDegreesPerSecond * Time.unscaledDeltaTime);
+            status = $"表示Yaw {settings.yaw:0.0}°";
+        }
+
+        private void ApplyMaterialYawShortPress(float delta)
+        {
+            settings.yaw = SanitizeContinuousYaw(settings.yaw + delta);
+            status = $"表示Yaw {settings.yaw:0.0}°";
         }
 
         private static bool IsTextInputFocused()
@@ -6425,6 +7556,7 @@ namespace DomeProjection
                     ? JsonUtility.FromJson<DomeProjectionSettings>(File.ReadAllText(loadPath))
                     : new DomeProjectionSettings();
                 settings ??= new DomeProjectionSettings();
+                var loadedSettingsVersion = settings.settingsVersion;
                 settings.Migrate();
                 settings.Clamp();
                 pathField = settings.videoPath ?? string.Empty;
@@ -6440,6 +7572,13 @@ namespace DomeProjection
                     settings.videoPath = string.Empty;
                     status = "旧版で文字化けした素材パスを消去しました。素材を選び直してください。";
                 }
+
+                // Rewrite migrated Control settings immediately. Besides
+                // persisting normal migrations, this physically removes the
+                // deleted GUI residual-warp keys from old JSON instead of
+                // merely ignoring them in memory.
+                if (!projectorMode && loadedSettingsVersion < settings.settingsVersion)
+                    SaveSettings();
             }
             catch (Exception exception)
             {

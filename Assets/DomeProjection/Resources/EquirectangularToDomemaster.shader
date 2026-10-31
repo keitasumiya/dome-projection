@@ -33,6 +33,7 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
             float _DomeFov;
             float _ProjectionRegionMode;
             float4 _OffAxisProjection;
+            float2 _OffAxisHorizontal;
             float4 _RoomDimensions;
             float4 _RoomProjectorPosition;
             float4 _RoomProjectorRotation;
@@ -482,11 +483,17 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
                     float aimSin = sin(aim);
                     float3 opticalRay = float3(sinTheta * sin(azimuth),
                         sinTheta * cos(azimuth), cos(theta));
-                    float3 ray = float3(opticalRay.x,
+                    float3 pitchedRay = float3(opticalRay.x,
                         aimCos * opticalRay.y + aimSin * opticalRay.z,
                         -aimSin * opticalRay.y + aimCos * opticalRay.z);
-                    ray = normalize(ray);
-                    float3 projectorPosition = float3(0.0,
+                    float yaw = radians(_OffAxisHorizontal.y);
+                    float yawCos = cos(yaw);
+                    float yawSin = sin(yaw);
+                    float3 ray = normalize(float3(
+                        yawCos * pitchedRay.x + yawSin * pitchedRay.z,
+                        pitchedRay.y,
+                        -yawSin * pitchedRay.x + yawCos * pitchedRay.z));
+                    float3 projectorPosition = float3(_OffAxisHorizontal.x,
                         _OffAxisProjection.y, -_OffAxisProjection.x);
                     float projected = dot(projectorPosition, ray);
                     float discriminant = projected * projected

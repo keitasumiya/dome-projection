@@ -138,13 +138,14 @@ namespace DomeProjection
     [Serializable]
     public sealed class DomePlaylistCatalog
     {
-        public int version = 3;
+        public int version = 5;
         public List<DomePlaylistDefinition> playlists = new List<DomePlaylistDefinition>();
 
         public void Normalize()
         {
             var needsAutoAdvanceMigration = version < 2;
             var needsTransitionMigration = version < 3;
+            var needsLoopModeMigration = version < 5;
             playlists ??= new List<DomePlaylistDefinition>();
             for (var i = playlists.Count - 1; i >= 0; i--)
             {
@@ -163,24 +164,45 @@ namespace DomeProjection
                     playlist.transitionMode = 1;
                     playlist.transitionSeconds = 0.8f;
                 }
+                if (needsLoopModeMigration) playlist.loopMode = playlist.loop ? 1 : 0;
+                playlist.loopMode = Mathf.Clamp(playlist.loopMode, 0, 2);
+                playlist.loop = playlist.loopMode == 1;
                 playlist.transitionMode = Mathf.Clamp(playlist.transitionMode, 0, 1);
                 playlist.transitionSeconds = Mathf.Clamp(playlist.transitionSeconds, 0.2f, 3f);
                 playlist.materialIds ??= new List<string>();
+                playlist.entryDurationSeconds ??= new List<float>();
+                while (playlist.entryDurationSeconds.Count < playlist.materialIds.Count)
+                    playlist.entryDurationSeconds.Add(DomePlaylistDefinition.DefaultStillImageDurationSeconds);
+                if (playlist.entryDurationSeconds.Count > playlist.materialIds.Count)
+                    playlist.entryDurationSeconds.RemoveRange(playlist.materialIds.Count,
+                        playlist.entryDurationSeconds.Count - playlist.materialIds.Count);
+                for (var entryIndex = 0; entryIndex < playlist.entryDurationSeconds.Count; entryIndex++)
+                    playlist.entryDurationSeconds[entryIndex] = Mathf.Clamp(
+                        playlist.entryDurationSeconds[entryIndex], 0.5f, 3600f);
             }
-            version = 3;
+            version = 5;
         }
     }
 
     [Serializable]
     public sealed class DomePlaylistDefinition
     {
+        public const float DefaultStillImageDurationSeconds = 5f;
+
         public string id = string.Empty;
         public string name = string.Empty;
         public bool autoAdvance = true;
+        // Legacy whole-playlist flag retained for old JSON/readers.
         public bool loop;
+        // 0 = none, 1 = whole playlist, 2 = current entry.
+        public int loopMode;
         public int transitionMode = 1;
         public float transitionSeconds = 0.8f;
         public List<string> materialIds = new List<string>();
+        // One value per materialIds entry. It is used when that entry is a
+        // still image, allowing the same registered image to have a different
+        // display time in each playlist or even in two slots of one playlist.
+        public List<float> entryDurationSeconds = new List<float>();
     }
 
     public sealed class DomeConfigurationStore
@@ -224,8 +246,10 @@ namespace DomeProjection
                 + "playlists.json\n"
                 + "- playlists: ordered playback lists\n"
                 + "- materialIds: material id values from materials.json in playback order\n"
+                + "- entryDurationSeconds: still-image display seconds, one value per materialIds entry\n"
                 + "- autoAdvance: automatically open the next item when a video ends\n"
-                + "- loop: return to the first item after the last item\n\n"
+                + "- loopMode: 0 = none, 1 = whole playlist, 2 = current item\n"
+                + "- loop: legacy whole-playlist flag (loopMode is authoritative)\n\n"
                 + "- transitionMode: 0 = cut, 1 = fade through black\n"
                 + "- transitionSeconds: total fade duration in seconds\n\n"
                 + "Lenses/*.json\n"
@@ -253,7 +277,7 @@ namespace DomeProjection
             catalog ??= new DomePlaylistCatalog();
             var loadedVersion = catalog.version;
             catalog.Normalize();
-            if (!fileExists || loadedVersion < 3) SavePlaylists(catalog);
+            if (!fileExists || loadedVersion < 5) SavePlaylists(catalog);
             return catalog;
         }
 

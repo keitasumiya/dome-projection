@@ -6,7 +6,7 @@ namespace DomeProjection
     [Serializable]
     public sealed class LensCalibrationProfile
     {
-        public int profileVersion = 10;
+        public int profileVersion = 13;
         public string displayName = string.Empty;
         public string savedUtc = string.Empty;
 
@@ -16,7 +16,9 @@ namespace DomeProjection
         public float domeFov = 180f;
         public int projectionRegionMode;
         public float offAxisProjectorDistance = 0.95f;
+        public float offAxisProjectorX;
         public float offAxisProjectorHeight;
+        public float offAxisAimYaw;
         public float offAxisAimElevation = 15f;
         public float offAxisMinimumElevation = -20f;
         public float roomWidth = 5f;
@@ -76,7 +78,9 @@ namespace DomeProjection
                 domeFov = settings.domeFov,
                 projectionRegionMode = settings.projectionRegionMode,
                 offAxisProjectorDistance = settings.offAxisProjectorDistance,
+                offAxisProjectorX = settings.offAxisProjectorX,
                 offAxisProjectorHeight = settings.offAxisProjectorHeight,
+                offAxisAimYaw = settings.offAxisAimYaw,
                 offAxisAimElevation = settings.offAxisAimElevation,
                 offAxisMinimumElevation = settings.offAxisMinimumElevation,
                 roomWidth = settings.roomWidth,
@@ -131,7 +135,9 @@ namespace DomeProjection
             settings.domeFov = domeFov;
             settings.projectionRegionMode = projectionRegionMode;
             settings.offAxisProjectorDistance = offAxisProjectorDistance;
+            settings.offAxisProjectorX = profileVersion >= 13 ? offAxisProjectorX : 0f;
             settings.offAxisProjectorHeight = offAxisProjectorHeight;
+            settings.offAxisAimYaw = profileVersion >= 13 ? offAxisAimYaw : 0f;
             settings.offAxisAimElevation = offAxisAimElevation;
             settings.offAxisMinimumElevation = offAxisMinimumElevation;
             settings.roomWidth = roomWidth;
@@ -211,7 +217,7 @@ namespace DomeProjection
     [Serializable]
     public sealed class DomeProjectionSettings
     {
-        public int settingsVersion = 29;
+        public int settingsVersion = 35;
         public string videoPath = string.Empty;
 
         // Input source. 0 = video/image file, 1 = captured desktop window.
@@ -267,6 +273,8 @@ namespace DomeProjection
         public float yaw;
         public float pitch = 180f;
         public float roll;
+        // Degrees per second while Q/E is held after the short-press delay.
+        public float materialYawKeyDegreesPerSecond = 15f;
         // Projection geometry. 0 = projector at the sphere centre; 1 = an
         // off-axis projector near the rear rim, aimed across the dome; 2 = a
         // rectangular room corner made of a front wall, side wall and ceiling.
@@ -275,7 +283,9 @@ namespace DomeProjection
         // Off-axis position is expressed in dome-radius units. The default is
         // just inside the rear rim at (0, height, -distance).
         public float offAxisProjectorDistance = 0.95f;
+        public float offAxisProjectorX;
         public float offAxisProjectorHeight;
+        public float offAxisAimYaw;
         public float offAxisAimElevation = 15f;
         // Lowest sphere elevation retained by the off-axis renderer. A value
         // of -20 degrees corresponds to the lower extent of a 220-degree
@@ -417,7 +427,9 @@ namespace DomeProjection
         {
             domeFov = 120f;
             offAxisProjectorDistance = 0.95f;
+            offAxisProjectorX = 0f;
             offAxisProjectorHeight = 0f;
+            offAxisAimYaw = 0f;
             offAxisAimElevation = 15f;
             offAxisMinimumElevation = -20f;
             centerX = centerY = 0.5f;
@@ -682,18 +694,33 @@ namespace DomeProjection
                 roomWarpReferenceFace = 0;
             }
 
-            settingsVersion = 29;
+            if (settingsVersion < 31)
+                materialYawKeyDegreesPerSecond = 15f;
+
+            if (settingsVersion < 34)
+            {
+                offAxisProjectorX = 0f;
+                offAxisAimYaw = 0f;
+            }
+
+            // Version 35 removes the temporary GUI residual mesh entirely.
+            // JsonUtility ignores its old JSON keys, so distorted saved point
+            // offsets can no longer affect either Control or Output.
+            settingsVersion = 35;
         }
 
         public void Clamp()
         {
-            yaw = Mathf.Repeat(yaw + 180f, 360f) - 180f;
+            if (float.IsNaN(yaw) || float.IsInfinity(yaw)) yaw = 0f;
+            materialYawKeyDegreesPerSecond = Mathf.Clamp(materialYawKeyDegreesPerSecond, 1f, 60f);
             pitch = Mathf.Clamp(pitch, -180f, 180f);
             roll = Mathf.Clamp(roll, -180f, 180f);
             projectionRegionMode = Mathf.Clamp(projectionRegionMode, 0, 2);
             domeFov = Mathf.Clamp(domeFov, 30f, 360f);
             offAxisProjectorDistance = Mathf.Clamp(offAxisProjectorDistance, 0f, 2f);
+            offAxisProjectorX = Mathf.Clamp(offAxisProjectorX, -2f, 2f);
             offAxisProjectorHeight = Mathf.Clamp(offAxisProjectorHeight, -1.5f, 1.5f);
+            offAxisAimYaw = Mathf.Clamp(offAxisAimYaw, -180f, 180f);
             offAxisAimElevation = Mathf.Clamp(offAxisAimElevation, -90f, 90f);
             offAxisMinimumElevation = Mathf.Clamp(offAxisMinimumElevation, -90f, 0f);
             roomWidth = Mathf.Clamp(roomWidth, 1f, 30f);
@@ -774,6 +801,7 @@ namespace DomeProjection
             bridgeUpdateHz = Mathf.Clamp(bridgeUpdateHz, 15, 120);
             idleDisplayMode = Mathf.Clamp(idleDisplayMode, 0, 1);
         }
+
     }
 }
 
