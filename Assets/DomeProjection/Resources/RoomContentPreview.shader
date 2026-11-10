@@ -137,7 +137,7 @@ Shader "Hidden/DomeProjection/RoomContentPreview"
                 else
                 {
                     direction = RotateDirection(direction, _Orientation);
-                    uv = float2(frac(atan2(direction.x, direction.z) / (2.0 * PI) + 0.5),
+                    uv = float2(frac(0.5 - atan2(direction.x, direction.z) / (2.0 * PI)),
                         0.5 - asin(clamp(direction.y, -1.0, 1.0)) / PI);
                 }
 

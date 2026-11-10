@@ -518,7 +518,10 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
                 }
 
                 float3 backgroundDirection = RotateDirection(direction, _Orientation);
-                float2 backgroundUV = float2(frac(atan2(backgroundDirection.x, backgroundDirection.z) / (2.0 * PI) + 0.5),
+                // The audience observes the texture from inside the dome.
+                // Negate longitude so a normal (non-mirrored) equirectangular
+                // source remains readable after projection onto the inner wall.
+                float2 backgroundUV = float2(frac(0.5 - atan2(backgroundDirection.x, backgroundDirection.z) / (2.0 * PI)),
                                              0.5 - asin(clamp(backgroundDirection.y, -1.0, 1.0)) / PI);
                 if (_InputFlip.x > 0.5) backgroundUV.x = 1.0 - backgroundUV.x;
                 if (_InputFlip.y > 0.5) backgroundUV.y = 1.0 - backgroundUV.y;
@@ -584,7 +587,8 @@ Shader "Hidden/DomeProjection/EquirectangularToDomemaster"
                     direction = RotateDirection(direction, _Orientation);
                     float longitude = atan2(direction.x, direction.z);
                     float latitude = asin(clamp(direction.y, -1.0, 1.0));
-                    videoUV = float2(frac(longitude / (2.0 * PI) + 0.5), 0.5 - latitude / PI);
+                    videoUV = float2(frac(0.5 - longitude / (2.0 * PI)),
+                        0.5 - latitude / PI);
                 }
                 if (_InputFlip.x > 0.5) videoUV.x = 1.0 - videoUV.x;
                 if (_InputFlip.y > 0.5) videoUV.y = 1.0 - videoUV.y;

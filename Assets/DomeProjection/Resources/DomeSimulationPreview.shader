@@ -201,7 +201,10 @@ Shader "Hidden/DomeProjection/DomeSimulationPreview"
                 else
                 {
                     direction = RotateDirection(direction, _Orientation);
-                    uv = float2(frac(atan2(direction.x, direction.z) / (2.0 * PI) + 0.5),
+                    // Match the audience-facing inner-wall convention used by
+                    // the Output shader; the outside 3D view must not turn
+                    // readable source text into a mirror image.
+                    uv = float2(frac(0.5 - atan2(direction.x, direction.z) / (2.0 * PI)),
                         0.5 - asin(clamp(direction.y, -1.0, 1.0)) / PI);
                 }
                 if (_InputFlip.x > 0.5) uv.x = 1.0 - uv.x;
